@@ -24,14 +24,16 @@
 - `学教学过程辅助软件项目开发步骤与实施方案.md`
 - `README.md`
 - `docs/phase-1-delivery.md`
+- `docs/phase-2-delivery.md`
 
 当前已完成：
 
 - 阶段 1：项目基础框架搭建
+- 阶段 2：系统管理与部署基础
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 2：系统管理与部署基础
+- 阶段 3：课程与班级基础数据
 
 ## 技术栈
 
@@ -80,7 +82,10 @@ backend/
     schemas/
       response.py      统一 API 响应模型
     services/
-      startup.py       启动检查、目录初始化、U 盘路径识别
+      auth.py          教师密码、登录令牌与鉴权服务
+      backup.py        本地与可移动盘备份、恢复服务
+      network.py       网卡候选地址、端口与防火墙引导
+      startup.py       启动检查、目录初始化、U 盘路径识别、自动备份任务
     main.py            FastAPI 应用入口
   run.py               Uvicorn 启动入口，含端口备选逻辑
   requirements.txt
@@ -106,6 +111,7 @@ scripts/
 
 docs/
   phase-1-delivery.md  阶段 1 交付说明
+  phase-2-delivery.md  阶段 2 交付说明
 ```
 
 ## 后端运行
@@ -277,6 +283,16 @@ npm run build
 ```powershell
 curl.exe http://127.0.0.1:8080/api/v1/health
 curl.exe http://127.0.0.1:8080/api/v1/system/startup
+```
+
+阶段 2 认证与系统管理接口：
+
+```text
+GET  /api/v1/auth/status
+POST /api/v1/auth/setup
+POST /api/v1/auth/login
+GET  /api/v1/system/access
+POST /api/v1/system/backups
 ```
 
 ## 运行中产生的本地文件

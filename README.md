@@ -1,6 +1,6 @@
 # 大学教学过程辅助软件
 
-本仓库当前完成“阶段 1：项目基础框架搭建”，提供可运行的 FastAPI 后端、React/Vite 前端、SQLite 初始化与迁移、配置加载、日志系统、静态资源托管和健康检查接口。
+本仓库当前已完成“阶段 1：项目基础框架搭建”和“阶段 2：系统管理与部署基础”，提供可运行的 FastAPI 后端、React/Vite 前端、SQLite 初始化与迁移、教师认证、网卡端口检测、防火墙引导、数据库备份恢复基础能力和健康检查接口。
 
 ## 技术栈
 
@@ -58,6 +58,16 @@ GET /api/v1/health
 GET /api/v1/system/startup
 ```
 
+教师认证与系统管理：
+
+```text
+GET  /api/v1/auth/status
+POST /api/v1/auth/setup
+POST /api/v1/auth/login
+GET  /api/v1/system/access
+POST /api/v1/system/backups
+```
+
 ## 前端开发
 
 ```powershell
@@ -100,3 +110,14 @@ SQLite 启动参数：
 - 基础配置文件：已完成
 - 项目目录规范：已完成
 - 开发环境说明文档：已完成
+
+## 阶段 2 交付状态
+
+- 教师首次设置密码与登录鉴权：已完成
+- 教师端系统管理接口 Bearer Token 鉴权：已完成
+- 网卡候选 IP、端口检测、访问地址生成：已完成
+- Windows 防火墙引导命令：已完成
+- 本地与可移动盘手动备份、自动备份、保留最近 5 份：已完成
+- 备份恢复前安全副本：已完成
+
+阶段说明见 `docs/phase-2-delivery.md`。

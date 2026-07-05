@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -10,7 +11,7 @@ from app.core.config import PROJECT_ROOT, get_settings
 from app.core.exceptions import add_exception_handlers
 from app.core.logging import configure_logging
 from app.schemas.response import ok
-from app.services.startup import run_startup_checks
+from app.services.startup import auto_backup_worker, run_startup_checks
 
 
 settings = get_settings()
@@ -47,7 +48,14 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup() -> None:
         app.state.startup_checks = run_startup_checks(settings)
+        app.state.auto_backup_task = asyncio.create_task(auto_backup_worker())
         logger.info("Application startup checks completed")
+
+    @app.on_event("shutdown")
+    async def shutdown() -> None:
+        task = getattr(app.state, "auto_backup_task", None)
+        if task:
+            task.cancel()
 
     return app
 

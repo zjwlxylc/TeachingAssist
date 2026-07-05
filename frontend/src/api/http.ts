@@ -7,10 +7,22 @@ export interface ApiResponse<T> {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
 
+let authToken: string | null = localStorage.getItem("teacher_token");
+
+export function setAuthToken(token: string | null) {
+  authToken = token;
+  if (token) {
+    localStorage.setItem("teacher_token", token);
+  } else {
+    localStorage.removeItem("teacher_token");
+  }
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(init?.headers ?? {})
     },
     ...init

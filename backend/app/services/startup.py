@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from pathlib import Path
 
@@ -52,3 +53,15 @@ def run_startup_checks(settings: AppSettings) -> dict[str, object]:
         "integrity": integrity,
         "removable_root": str(removable_root) if removable_root else None,
     }
+
+
+async def auto_backup_worker(interval_seconds: int = 900) -> None:
+    from app.services.backup import create_backup
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            create_backup("auto")
+            logger.info("Automatic database backup completed")
+        except Exception:
+            logger.exception("Automatic database backup failed")
