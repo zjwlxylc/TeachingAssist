@@ -1,0 +1,55 @@
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.api.router import api_router
+from app.core.config import PROJECT_ROOT, get_settings
+from app.core.exceptions import add_exception_handlers
+from app.core.logging import configure_logging
+from app.schemas.response import ok
+from app.services.startup import run_startup_checks
+
+
+settings = get_settings()
+configure_logging(settings)
+logger = logging.getLogger(__name__)
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title=settings.app_name, version="0.1.0")
+    app.logger = logger
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.server.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    add_exception_handlers(app)
+    app.include_router(api_router, prefix=settings.api_prefix)
+
+    frontend_dist = PROJECT_ROOT / "frontend" / "dist"
+    if frontend_dist.exists():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    else:
+        static_dir = Path(__file__).parent / "static"
+        static_dir.mkdir(exist_ok=True)
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+        @app.get("/")
+        def root():
+            return ok({"message": "后端服务已启动，前端尚未构建"})
+
+    @app.on_event("startup")
+    async def startup() -> None:
+        app.state.startup_checks = run_startup_checks(settings)
+        logger.info("Application startup checks completed")
+
+    return app
+
+
+app = create_app()
