@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
@@ -35,6 +35,20 @@ class AnswerSubmitRequest(BaseModel):
     name: str = Field(min_length=1)
     answer: Any = None
     action: str = "submit_answer"
+
+
+class DraftQueryRequest(BaseModel):
+    student_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class BonusSettingsRequest(BaseModel):
+    participation_score: float = 1
+    correct_score: float = 2
+    timeliness_score: float = 0.5
+    timeliness_percent: float = 30
+    max_quality_score: float = 3
+    session_cap: float = 20
 
 
 @router.post("/sessions/{session_id}", response_model=ApiResponse[dict[str, object]])
@@ -76,3 +90,50 @@ def question_stats(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     return ok(question_service.get_question_stats(question_id))
+
+
+@router.get("/{question_id}/stats/anonymous", response_model=ApiResponse[dict[str, object]])
+def anonymous_question_stats(
+    question_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(question_service.get_anonymous_question_stats(question_id))
+
+
+@router.post("/{question_id}/draft", response_model=ApiResponse[dict[str, object]])
+def student_draft(question_id: int, payload: DraftQueryRequest) -> ApiResponse[dict[str, object]]:
+    return ok(question_service.get_student_draft(question_id, payload.student_id, payload.name))
+
+
+@router.get("/sessions/{session_id}/answers.csv")
+def export_answers(
+    session_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> Response:
+    exported = question_service.export_question_answers(session_id)
+    return Response(
+        content=exported["content"],
+        media_type=exported["content_type"],
+        headers={"Content-Disposition": f"attachment; filename={exported['file_name']}"},
+    )
+
+
+@router.get("/sessions/{session_id}/bonus", response_model=ApiResponse[dict[str, object]])
+def bonus_summary(
+    session_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(question_service.get_session_bonus_summary(session_id))
+
+
+@router.get("/bonus/settings", response_model=ApiResponse[dict[str, object]])
+def bonus_settings(_teacher: dict[str, object] = Depends(require_teacher)) -> ApiResponse[dict[str, object]]:
+    return ok(question_service.get_bonus_settings())
+
+
+@router.put("/bonus/settings", response_model=ApiResponse[dict[str, object]])
+def update_bonus_settings(
+    payload: BonusSettingsRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(question_service.update_bonus_settings(payload.model_dump()), message="加分规则已保存")

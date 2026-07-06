@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
@@ -42,6 +42,11 @@ class ConfirmImportRequest(BaseModel):
     course_id: int
     mapping: dict[str, str]
     import_valid_only: bool = True
+    duplicate_strategy: str = "merge"
+
+
+class StudentActiveRequest(BaseModel):
+    is_active: bool
 
 
 @router.get("/courses", response_model=ApiResponse[list[dict[str, object]]])
@@ -102,9 +107,22 @@ def create_session(
 def students(
     course_id: int | None = None,
     class_id: int | None = None,
+    include_inactive: bool = False,
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[list[dict[str, object]]]:
-    return ok(academic_service.list_students(course_id, class_id))
+    return ok(academic_service.list_students(course_id, class_id, include_inactive))
+
+
+@router.put("/students/{student_pk}/active", response_model=ApiResponse[dict[str, object]])
+def set_student_active(
+    student_pk: int,
+    payload: StudentActiveRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(
+        academic_service.set_student_active(student_pk, payload.is_active),
+        message="学生状态已更新",
+    )
 
 
 @router.post("/imports/excel", response_model=ApiResponse[dict[str, object]])
@@ -128,6 +146,27 @@ def preview_import(
     return ok(academic_service.preview_import(job_id, payload.mapping))
 
 
+@router.post("/imports/{job_id}/mapping-suggestion", response_model=ApiResponse[dict[str, object]])
+def suggest_import_mapping(
+    job_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(academic_service.suggest_import_mapping(job_id))
+
+
+@router.get("/imports/{job_id}/errors.csv")
+def export_import_errors(
+    job_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> Response:
+    exported = academic_service.export_import_errors(job_id)
+    return Response(
+        content=exported["content"],
+        media_type=exported["content_type"],
+        headers={"Content-Disposition": f"attachment; filename={exported['file_name']}"},
+    )
+
+
 @router.post("/imports/{job_id}/confirm", response_model=ApiResponse[dict[str, object]])
 def confirm_import(
     job_id: int,
@@ -135,6 +174,12 @@ def confirm_import(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     return ok(
-        academic_service.confirm_import(job_id, payload.course_id, payload.mapping, payload.import_valid_only),
+        academic_service.confirm_import(
+            job_id,
+            payload.course_id,
+            payload.mapping,
+            payload.import_valid_only,
+            payload.duplicate_strategy,
+        ),
         message="学生名单已导入",
     )

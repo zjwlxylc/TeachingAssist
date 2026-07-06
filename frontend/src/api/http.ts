@@ -35,3 +35,26 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return payload.data;
 }
+
+export async function downloadFile(path: string, fallbackName: string) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+    }
+  });
+  if (!response.ok) {
+    throw new Error("文件下载失败");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = disposition.match(/filename="?([^"]+)"?/i);
+  const fileName = match?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}

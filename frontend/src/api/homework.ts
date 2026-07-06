@@ -1,4 +1,4 @@
-import { request } from "./http";
+import { downloadFile, request } from "./http";
 
 export interface HomeworkAttachment {
   id: number;
@@ -54,6 +54,12 @@ export interface HomeworkSubmissionRecord {
   submit_version: number | null;
   submitted_at: string | null;
   created_at: string | null;
+  ai_score?: number | null;
+  ai_feedback?: Record<string, unknown> | null;
+  ai_confidence?: number | null;
+  final_score?: number | null;
+  final_feedback?: string | null;
+  grade_published_at?: string | null;
   files: HomeworkSubmissionFile[];
 }
 
@@ -129,4 +135,43 @@ export function submitHomework(
 
 export function fetchHomeworkSubmissionSummary(homeworkId: number) {
   return request<HomeworkSubmissionSummary>(`/homework/${homeworkId}/submissions`);
+}
+
+export function addHomeworkAttachments(homeworkId: number, files: File[]) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+  return request<Homework>(`/homework/${homeworkId}/attachments`, {
+    method: "POST",
+    body: formData
+  });
+}
+
+export function startHomeworkAiReview(homeworkId: number) {
+  return request<Record<string, unknown>>(`/homework/${homeworkId}/ai-review`, {
+    method: "POST"
+  });
+}
+
+export function reviewHomeworkSubmission(submissionId: number, finalScore: number, finalFeedback?: string) {
+  return request<Record<string, unknown>>(`/homework/submissions/${submissionId}/review`, {
+    method: "PUT",
+    body: JSON.stringify({ final_score: finalScore, final_feedback: finalFeedback })
+  });
+}
+
+export function publishHomeworkGrades(homeworkId: number) {
+  return request<Record<string, unknown>>(`/homework/${homeworkId}/publish-grades`, {
+    method: "POST"
+  });
+}
+
+export function fetchHomeworkFeedback(homeworkId: number, studentId: string, name: string) {
+  return request<Record<string, unknown>>(`/homework/${homeworkId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId, name })
+  });
+}
+
+export function downloadHomeworkSubmissions(homeworkId: number) {
+  return downloadFile(`/homework/${homeworkId}/submissions.csv`, `homework_${homeworkId}_submissions.csv`);
 }

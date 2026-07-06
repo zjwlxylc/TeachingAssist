@@ -42,6 +42,9 @@ import QuizIcon from "@mui/icons-material/Quiz";
 import SendIcon from "@mui/icons-material/Send";
 import AssignmentIcon from "@mui/icons-material/Assignment";
 import PsychologyIcon from "@mui/icons-material/Psychology";
+import AssessmentIcon from "@mui/icons-material/Assessment";
+import DownloadIcon from "@mui/icons-material/Download";
+import RestoreIcon from "@mui/icons-material/Restore";
 
 import {
   ClassGroup,
@@ -54,12 +57,15 @@ import {
   createClass,
   createCourse,
   createSession,
+  downloadImportErrors,
   fetchClasses,
   fetchCourses,
   fetchSessions,
   fetchStudents,
   linkCourseClass,
   previewStudentImport,
+  setStudentActive,
+  suggestStudentImportMapping,
   uploadStudentExcel
 } from "../api/academic";
 import { fetchAuthStatus, login, setupPassword, AuthStatus } from "../api/auth";
@@ -82,25 +88,39 @@ import {
 } from "../api/announcements";
 import {
   SignInSummary,
+  downloadSignIns,
   endClassroomSession,
+  fetchSignInLogs,
   fetchSignInSummary,
-  startClassroomSession
+  startClassroomSession,
+  updateSignInStatus
 } from "../api/classroom";
 import {
+  BonusSummary,
   Question,
   QuestionOption,
   QuestionStats,
   QuestionType,
+  downloadQuestionAnswers,
+  fetchAnonymousQuestionStats,
+  fetchQuestionBonusSettings,
+  fetchQuestionBonusSummary,
   fetchQuestionStats,
   fetchQuestions,
-  publishQuestion
+  publishQuestion,
+  updateQuestionBonusSettings
 } from "../api/questions";
 import {
   Homework,
   HomeworkSubmissionSummary,
+  addHomeworkAttachments,
   createHomework,
+  downloadHomeworkSubmissions,
   fetchHomework,
-  fetchHomeworkSubmissionSummary
+  fetchHomeworkSubmissionSummary,
+  publishHomeworkGrades,
+  reviewHomeworkSubmission,
+  startHomeworkAiReview
 } from "../api/homework";
 import {
   AiOverview,
@@ -114,6 +134,18 @@ import {
   updateAiProvider,
   updateAiSafety
 } from "../api/ai";
+import {
+  EvaluationReport,
+  calculateEvaluation,
+  downloadEvaluationReport,
+  fetchEvaluationReport,
+  updateEvaluationWeights
+} from "../api/evaluation";
+import {
+  applyRecoveryAction,
+  fetchRecoveryEvents,
+  recordInterruption
+} from "../api/recovery";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
 
@@ -156,7 +188,11 @@ export function TeacherPage() {
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [duplicateStrategy, setDuplicateStrategy] = useState<"merge" | "overwrite" | "skip">("merge");
+  const [showInactiveStudents, setShowInactiveStudents] = useState(false);
   const [signInSummary, setSignInSummary] = useState<SignInSummary | null>(null);
+  const [signInLogs, setSignInLogs] = useState<Array<Record<string, unknown>>>([]);
+  const [signInReason, setSignInReason] = useState("教师手动调整");
   const [announcementSessionId, setAnnouncementSessionId] = useState<number | "">("");
   const [announcementContent, setAnnouncementContent] = useState("");
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -171,6 +207,9 @@ export function TeacherPage() {
   const [questionScore, setQuestionScore] = useState<number | "">(1);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [questionStats, setQuestionStats] = useState<QuestionStats | null>(null);
+  const [anonymousStats, setAnonymousStats] = useState<Record<string, unknown> | null>(null);
+  const [bonusSummary, setBonusSummary] = useState<BonusSummary | null>(null);
+  const [bonusSettings, setBonusSettings] = useState<Record<string, number | string>>({});
   const [homeworkSessionId, setHomeworkSessionId] = useState<number | "">("");
   const [homeworkTitle, setHomeworkTitle] = useState("");
   const [homeworkDescription, setHomeworkDescription] = useState("");
@@ -179,6 +218,22 @@ export function TeacherPage() {
   const [homeworkAllowLate, setHomeworkAllowLate] = useState(false);
   const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
   const [homeworkSummary, setHomeworkSummary] = useState<HomeworkSubmissionSummary | null>(null);
+  const [homeworkAttachmentFiles, setHomeworkAttachmentFiles] = useState<Record<number, File[]>>({});
+  const [reviewScores, setReviewScores] = useState<Record<number, string>>({});
+  const [reviewFeedback, setReviewFeedback] = useState<Record<number, string>>({});
+  const [evaluationSessionId, setEvaluationSessionId] = useState<number | "">("");
+  const [evaluationReport, setEvaluationReport] = useState<EvaluationReport | null>(null);
+  const [evaluationWeights, setEvaluationWeights] = useState<Record<string, number | string>>({
+    attendance_weight: 20,
+    question_weight: 35,
+    homework_weight: 25,
+    message_weight: 10,
+    activity_weight: 10
+  });
+  const [recoverySessionId, setRecoverySessionId] = useState<number | "">("");
+  const [recoveryStartedAt, setRecoveryStartedAt] = useState("");
+  const [recoveryEndedAt, setRecoveryEndedAt] = useState("");
+  const [recoveryEvents, setRecoveryEvents] = useState<Array<Record<string, unknown>>>([]);
   const [aiProviderId, setAiProviderId] = useState<number | "">("");
   const [aiProviderName, setAiProviderName] = useState("");
   const [aiDisplayName, setAiDisplayName] = useState("");
@@ -224,7 +279,7 @@ export function TeacherPage() {
       fetchCourses(),
       fetchClasses(),
       fetchSessions(),
-      fetchStudents()
+      fetchStudents(undefined, undefined, showInactiveStudents)
     ])
       .then(([accessData, aiData, aiTasks, backupData, courseData, classData, sessionData, studentData]) => {
         setAccessInfo(accessData);
@@ -239,14 +294,14 @@ export function TeacherPage() {
         setStudents(studentData);
       })
       .catch((err: Error) => setError(err.message));
-  }, [isAuthenticated]);
+  }, [isAuthenticated, showInactiveStudents]);
 
   async function reloadAcademic() {
     const [courseData, classData, sessionData, studentData] = await Promise.all([
       fetchCourses(),
       fetchClasses(),
       fetchSessions(),
-      fetchStudents()
+      fetchStudents(undefined, undefined, showInactiveStudents)
     ]);
     setCourses(courseData);
     setClasses(classData);
@@ -498,15 +553,55 @@ export function TeacherPage() {
     }
   }
 
+  async function handleSuggestImportMapping() {
+    if (!importJob) {
+      return;
+    }
+    try {
+      const suggestion = await suggestStudentImportMapping(importJob.job_id);
+      setFieldMapping(suggestion.mapping);
+      setMessage(suggestion.message);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   async function handleConfirmImport() {
     if (!importJob || !selectedCourseId) {
       setError("请先选择课程并生成导入预览");
       return;
     }
     try {
-      const result = await confirmStudentImport(importJob.job_id, Number(selectedCourseId), fieldMapping, true);
+      const result = await confirmStudentImport(
+        importJob.job_id,
+        Number(selectedCourseId),
+        fieldMapping,
+        true,
+        duplicateStrategy
+      );
       await reloadAcademic();
-      setMessage(`导入 ${result.imported} 人，跳过 ${result.skipped} 人`);
+      setMessage(`导入 ${result.imported} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleDownloadImportErrors() {
+    if (!importJob) {
+      return;
+    }
+    try {
+      await downloadImportErrors(importJob.job_id);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleToggleStudentActive(student: Student) {
+    try {
+      await setStudentActive(student.id, !student.is_active);
+      await reloadAcademic();
+      setMessage(student.is_active ? "学生已停用" : "学生已启用");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -537,7 +632,32 @@ export function TeacherPage() {
   async function handleLoadSignIns(sessionId: number) {
     try {
       setSignInSummary(await fetchSignInSummary(sessionId));
+      setSignInLogs(await fetchSignInLogs(sessionId));
       setMessage("签到统计已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleUpdateSignIn(studentPk: number, status: "normal" | "late" | "absent") {
+    if (!signInSummary) {
+      return;
+    }
+    try {
+      setSignInSummary(await updateSignInStatus(signInSummary.session.id, studentPk, status, signInReason || undefined));
+      setSignInLogs(await fetchSignInLogs(signInSummary.session.id));
+      setMessage(status === "absent" ? "签到状态已改为缺勤" : "补签/状态修改已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleDownloadSignIns() {
+    if (!signInSummary) {
+      return;
+    }
+    try {
+      await downloadSignIns(signInSummary.session.id);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -570,8 +690,16 @@ export function TeacherPage() {
   async function handleLoadQuestions(sessionId: number) {
     try {
       setQuestionSessionId(sessionId);
-      setQuestions(await fetchQuestions(sessionId));
+      const [questionItems, settings, bonus] = await Promise.all([
+        fetchQuestions(sessionId),
+        fetchQuestionBonusSettings(),
+        fetchQuestionBonusSummary(sessionId)
+      ]);
+      setQuestions(questionItems);
+      setBonusSettings(settings);
+      setBonusSummary(bonus);
       setQuestionStats(null);
+      setAnonymousStats(null);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -647,8 +775,39 @@ export function TeacherPage() {
 
   async function handleLoadQuestionStats(questionId: number) {
     try {
-      setQuestionStats(await fetchQuestionStats(questionId));
+      const [stats, anonymous] = await Promise.all([
+        fetchQuestionStats(questionId),
+        fetchAnonymousQuestionStats(questionId)
+      ]);
+      setQuestionStats(stats);
+      setAnonymousStats(anonymous);
       setMessage("问答统计已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSaveBonusSettings() {
+    const payload = Object.fromEntries(
+      Object.entries(bonusSettings).map(([key, value]) => [key, Number(value) || 0])
+    );
+    try {
+      setBonusSettings(await updateQuestionBonusSettings(payload));
+      if (questionSessionId) {
+        setBonusSummary(await fetchQuestionBonusSummary(Number(questionSessionId)));
+      }
+      setMessage("问答加分规则已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleDownloadQuestionAnswers() {
+    if (!questionSessionId) {
+      return;
+    }
+    try {
+      await downloadQuestionAnswers(Number(questionSessionId));
     } catch (err) {
       setError((err as Error).message);
     }
@@ -693,6 +852,154 @@ export function TeacherPage() {
     try {
       setHomeworkSummary(await fetchHomeworkSubmissionSummary(homeworkId));
       setMessage("作业提交列表已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleAddHomeworkAttachments(homeworkId: number) {
+    const files = homeworkAttachmentFiles[homeworkId] ?? [];
+    if (!files.length) {
+      setError("请先选择教师附件");
+      return;
+    }
+    try {
+      await addHomeworkAttachments(homeworkId, files);
+      setHomeworkAttachmentFiles((current) => ({ ...current, [homeworkId]: [] }));
+      if (homeworkSessionId) {
+        setHomeworkList(await fetchHomework(Number(homeworkSessionId)));
+      }
+      setMessage("作业附件已上传");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleStartHomeworkAiReview(homeworkId: number) {
+    try {
+      const job = await startHomeworkAiReview(homeworkId);
+      setHomeworkSummary(await fetchHomeworkSubmissionSummary(homeworkId));
+      setMessage(String(job.message ?? "AI 批阅任务已处理"));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleReviewSubmission(submissionId: number, homeworkId: number) {
+    const score = Number(reviewScores[submissionId]);
+    if (!Number.isFinite(score)) {
+      setError("请输入教师复核分数");
+      return;
+    }
+    try {
+      await reviewHomeworkSubmission(submissionId, score, reviewFeedback[submissionId] || undefined);
+      setHomeworkSummary(await fetchHomeworkSubmissionSummary(homeworkId));
+      setMessage("教师复核已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handlePublishHomeworkGrades(homeworkId: number) {
+    try {
+      const result = await publishHomeworkGrades(homeworkId);
+      setHomeworkSummary(await fetchHomeworkSubmissionSummary(homeworkId));
+      setMessage(`已发布 ${result.published ?? 0} 份作业成绩`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleDownloadHomework(homeworkId: number) {
+    try {
+      await downloadHomeworkSubmissions(homeworkId);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleCalculateEvaluation(versionType: "temporary" | "final") {
+    if (!evaluationSessionId) {
+      setError("请先选择评估课堂");
+      return;
+    }
+    try {
+      const report = await calculateEvaluation(Number(evaluationSessionId), versionType);
+      setEvaluationReport(report);
+      setEvaluationWeights(report.weights);
+      setMessage(versionType === "final" ? "最终评估已生成" : "临时评估已生成");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadEvaluation(sessionId: number) {
+    try {
+      setEvaluationSessionId(sessionId);
+      const report = await fetchEvaluationReport(sessionId);
+      setEvaluationReport(report);
+      if (Object.keys(report.weights).length) {
+        setEvaluationWeights(report.weights);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSaveEvaluationWeights() {
+    const payload = Object.fromEntries(
+      Object.entries(evaluationWeights).map(([key, value]) => [key, Number(value) || 0])
+    );
+    try {
+      setEvaluationWeights(await updateEvaluationWeights(payload));
+      setMessage("评估权重已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleDownloadEvaluation() {
+    if (!evaluationSessionId) {
+      return;
+    }
+    try {
+      await downloadEvaluationReport(Number(evaluationSessionId));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadRecoveryEvents(sessionId: number) {
+    try {
+      setRecoverySessionId(sessionId);
+      setRecoveryEvents(await fetchRecoveryEvents(sessionId));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleRecordInterruption() {
+    if (!recoverySessionId || !recoveryStartedAt || !recoveryEndedAt) {
+      setError("请先选择课堂并填写中断起止时间");
+      return;
+    }
+    try {
+      await recordInterruption(Number(recoverySessionId), recoveryStartedAt, recoveryEndedAt);
+      setRecoveryEvents(await fetchRecoveryEvents(Number(recoverySessionId)));
+      setMessage("中断事件已记录");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleApplyRecovery(eventId: number, action: "extend_questions" | "reopen_sign_in") {
+    if (!recoverySessionId) {
+      return;
+    }
+    try {
+      await applyRecoveryAction(Number(recoverySessionId), eventId, action);
+      setRecoveryEvents(await fetchRecoveryEvents(Number(recoverySessionId)));
+      setMessage(action === "extend_questions" ? "答题截止时间已延长" : "签到窗口已重新开放");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1170,9 +1477,14 @@ export function TeacherPage() {
                             </Select>
                           </FormControl>
                         ))}
-                        <Button variant="contained" onClick={handlePreviewImport}>
-                          生成预览
-                        </Button>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <Button variant="outlined" startIcon={<PsychologyIcon />} onClick={handleSuggestImportMapping}>
+                            AI 映射
+                          </Button>
+                          <Button variant="contained" onClick={handlePreviewImport}>
+                            生成预览
+                          </Button>
+                        </Stack>
                       </Stack>
                     )}
                   </Stack>
@@ -1213,9 +1525,29 @@ export function TeacherPage() {
                             </TableBody>
                           </Table>
                         </Paper>
-                        <Button variant="contained" onClick={handleConfirmImport} disabled={Boolean(importPreview.error_count)}>
-                          确认导入有效数据
-                        </Button>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <FormControl size="small" sx={{ minWidth: 160 }}>
+                            <InputLabel id="duplicate-strategy-label">重复学号</InputLabel>
+                            <Select
+                              labelId="duplicate-strategy-label"
+                              label="重复学号"
+                              value={duplicateStrategy}
+                              onChange={(event) => setDuplicateStrategy(event.target.value as "merge" | "overwrite" | "skip")}
+                            >
+                              <MenuItem value="merge">增量合并</MenuItem>
+                              <MenuItem value="overwrite">覆盖更新</MenuItem>
+                              <MenuItem value="skip">跳过重复</MenuItem>
+                            </Select>
+                          </FormControl>
+                          <Button variant="contained" onClick={handleConfirmImport} disabled={Boolean(importPreview.error_count)}>
+                            确认导入有效数据
+                          </Button>
+                          {importPreview.error_count > 0 && (
+                            <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadImportErrors}>
+                              错误报告
+                            </Button>
+                          )}
+                        </Stack>
                       </>
                     ) : (
                       <Typography color="text.secondary">上传文件并完成字段映射后生成预览。</Typography>
@@ -1249,17 +1581,194 @@ export function TeacherPage() {
                   <Typography fontWeight={700} sx={{ mb: 1 }}>
                     学生名单
                   </Typography>
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={showInactiveStudents}
+                        onChange={(event) => setShowInactiveStudents(event.target.checked)}
+                      />
+                    }
+                    label="显示停用学生"
+                  />
                   <Stack spacing={1}>
-                    {students.slice(0, 5).map((student) => (
+                    {students.slice(0, 8).map((student) => (
                       <Box key={student.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                        <Typography>
-                          {student.student_id} / {student.name}
-                        </Typography>
-                        <Typography color="text.secondary">{student.class_name}</Typography>
+                        <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
+                          <Box>
+                            <Typography>
+                              {student.student_id} / {student.name}
+                              {!student.is_active && <Chip size="small" color="default" label="已停用" sx={{ ml: 1 }} />}
+                            </Typography>
+                            <Typography color="text.secondary">{student.class_name}</Typography>
+                          </Box>
+                          <Button size="small" variant="outlined" onClick={() => handleToggleStudentActive(student)}>
+                            {student.is_active ? "停用" : "启用"}
+                          </Button>
+                        </Stack>
                       </Box>
                     ))}
                     {students.length === 0 && <Typography color="text.secondary">暂无学生</Typography>}
                   </Stack>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <AssessmentIcon color="primary" />
+                  <Typography variant="h2">学习评估与恢复</Typography>
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  汇总签到、问答和作业形成课堂评估；记录课堂中断并应用延时或重新开放签到。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={6}>
+                  <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
+                    <Stack spacing={1.5}>
+                      <Typography fontWeight={700}>学习效果评估</Typography>
+                      <FormControl fullWidth>
+                        <InputLabel id="evaluation-session-label">评估课堂</InputLabel>
+                        <Select
+                          labelId="evaluation-session-label"
+                          label="评估课堂"
+                          value={evaluationSessionId}
+                          onChange={(event) => handleLoadEvaluation(Number(event.target.value))}
+                        >
+                          {sessions.map((session) => (
+                            <MenuItem key={session.id} value={session.id}>
+                              #{session.id} {session.course_name} / {session.title}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <Grid container spacing={1}>
+                        {Object.entries(evaluationWeights).map(([key, value]) => (
+                          <Grid item xs={6} sm={4} key={key}>
+                            <TextField
+                              size="small"
+                              label={key}
+                              type="number"
+                              value={value}
+                              onChange={(event) =>
+                                setEvaluationWeights((current) => ({ ...current, [key]: event.target.value }))
+                              }
+                              fullWidth
+                            />
+                          </Grid>
+                        ))}
+                      </Grid>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <Button variant="outlined" onClick={handleSaveEvaluationWeights}>
+                          保存权重
+                        </Button>
+                        <Button variant="contained" onClick={() => handleCalculateEvaluation("temporary")}>
+                          临时评估
+                        </Button>
+                        <Button variant="outlined" onClick={() => handleCalculateEvaluation("final")}>
+                          最终评估
+                        </Button>
+                        <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadEvaluation}>
+                          导出
+                        </Button>
+                      </Stack>
+                      {evaluationReport && (
+                        <Paper variant="outlined" sx={{ p: 1.5, maxHeight: 260, overflow: "auto" }}>
+                          <Typography fontWeight={700}>
+                            {evaluationReport.version_type ?? "未生成"} v{evaluationReport.version_no ?? "-"}
+                          </Typography>
+                          <Typography color="text.secondary">
+                            共 {evaluationReport.summary.total ?? 0} 人，平均分 {evaluationReport.summary.average_score ?? 0}，
+                            出勤率 {evaluationReport.summary.attendance_rate ?? 0}%
+                          </Typography>
+                          <Stack spacing={0.5} sx={{ mt: 1 }}>
+                            {evaluationReport.records.slice(0, 8).map((record) => (
+                              <Typography key={String(record.student_id)} variant="body2" color="text.secondary">
+                                {String(record.student_number)} {String(record.student_name)}：{String(record.total_score)} /{" "}
+                                {String(record.level)}
+                              </Typography>
+                            ))}
+                          </Stack>
+                        </Paper>
+                      )}
+                    </Stack>
+                  </Paper>
+                </Grid>
+
+                <Grid item xs={12} md={6}>
+                  <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
+                    <Stack spacing={1.5}>
+                      <Typography fontWeight={700}>中断恢复</Typography>
+                      <FormControl fullWidth>
+                        <InputLabel id="recovery-session-label">恢复课堂</InputLabel>
+                        <Select
+                          labelId="recovery-session-label"
+                          label="恢复课堂"
+                          value={recoverySessionId}
+                          onChange={(event) => handleLoadRecoveryEvents(Number(event.target.value))}
+                        >
+                          {sessions.map((session) => (
+                            <MenuItem key={session.id} value={session.id}>
+                              #{session.id} {session.course_name} / {session.title}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <TextField
+                          label="中断开始"
+                          type="datetime-local"
+                          value={recoveryStartedAt}
+                          onChange={(event) => setRecoveryStartedAt(event.target.value)}
+                          InputLabelProps={{ shrink: true }}
+                          fullWidth
+                        />
+                        <TextField
+                          label="中断结束"
+                          type="datetime-local"
+                          value={recoveryEndedAt}
+                          onChange={(event) => setRecoveryEndedAt(event.target.value)}
+                          InputLabelProps={{ shrink: true }}
+                          fullWidth
+                        />
+                      </Stack>
+                      <Button variant="contained" startIcon={<RestoreIcon />} onClick={handleRecordInterruption}>
+                        记录中断
+                      </Button>
+                      <Paper variant="outlined" sx={{ p: 1.5, maxHeight: 260, overflow: "auto" }}>
+                        <Stack spacing={1}>
+                          {recoveryEvents.map((event) => (
+                            <Box key={String(event.id)} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                              <Typography fontWeight={700}>
+                                #{String(event.id)} {String(event.event_type)} / {String(event.duration_seconds ?? 0)} 秒
+                              </Typography>
+                              <Typography color="text.secondary" variant="body2">
+                                {String(event.started_at ?? event.created_at ?? "")} {String(event.action_taken ?? "")}
+                              </Typography>
+                              {event.event_type === "interruption" && (
+                                <Stack direction="row" spacing={1} sx={{ mt: 0.75 }}>
+                                  <Button size="small" variant="outlined" onClick={() => handleApplyRecovery(Number(event.id), "extend_questions")}>
+                                    延长答题
+                                  </Button>
+                                  <Button size="small" variant="outlined" onClick={() => handleApplyRecovery(Number(event.id), "reopen_sign_in")}>
+                                    重开签到
+                                  </Button>
+                                </Stack>
+                              )}
+                            </Box>
+                          ))}
+                          {recoveryEvents.length === 0 && <Typography color="text.secondary">暂无中断或重放记录。</Typography>}
+                        </Stack>
+                      </Paper>
+                    </Stack>
+                  </Paper>
                 </Grid>
               </Grid>
             </Stack>
@@ -1352,6 +1861,18 @@ export function TeacherPage() {
                             {signInSummary.stats.unsigned}
                           </Typography>
                         </Box>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <TextField
+                            size="small"
+                            label="调整原因"
+                            value={signInReason}
+                            onChange={(event) => setSignInReason(event.target.value)}
+                            fullWidth
+                          />
+                          <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadSignIns}>
+                            导出
+                          </Button>
+                        </Stack>
                         <Paper variant="outlined" sx={{ maxHeight: 320, overflow: "auto" }}>
                           <Table size="small" stickyHeader>
                             <TableHead>
@@ -1360,6 +1881,7 @@ export function TeacherPage() {
                                 <TableCell>姓名</TableCell>
                                 <TableCell>状态</TableCell>
                                 <TableCell>时间</TableCell>
+                                <TableCell>调整</TableCell>
                               </TableRow>
                             </TableHead>
                             <TableBody>
@@ -1369,10 +1891,37 @@ export function TeacherPage() {
                                   <TableCell>{record.student_name}</TableCell>
                                   <TableCell>{record.status ?? "未签到"}</TableCell>
                                   <TableCell>{record.sign_time ?? "-"}</TableCell>
+                                  <TableCell>
+                                    <Stack direction="row" spacing={0.5}>
+                                      <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "normal")}>
+                                        补签
+                                      </Button>
+                                      <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "late")}>
+                                        迟到
+                                      </Button>
+                                      <Button size="small" color="warning" onClick={() => handleUpdateSignIn(record.student_pk, "absent")}>
+                                        缺勤
+                                      </Button>
+                                    </Stack>
+                                  </TableCell>
                                 </TableRow>
                               ))}
                             </TableBody>
                           </Table>
+                        </Paper>
+                        <Paper variant="outlined" sx={{ p: 1.5, maxHeight: 160, overflow: "auto" }}>
+                          <Typography fontWeight={700} sx={{ mb: 1 }}>
+                            修改日志
+                          </Typography>
+                          <Stack spacing={0.5}>
+                            {signInLogs.map((log) => (
+                              <Typography key={String(log.id)} variant="body2" color="text.secondary">
+                                {String(log.created_at)} / {String(log.student_number)} {String(log.student_name)}：
+                                {String(log.previous_status ?? "未签到")} {"->"} {String(log.new_status)} / {String(log.reason ?? "")}
+                              </Typography>
+                            ))}
+                            {signInLogs.length === 0 && <Typography color="text.secondary">暂无手动调整记录。</Typography>}
+                          </Stack>
                         </Paper>
                       </Stack>
                     ) : (
@@ -1643,6 +2192,55 @@ export function TeacherPage() {
 
                 <Grid item xs={12} md={7}>
                   <Stack spacing={1.5}>
+                    {questionSessionId && (
+                      <Paper variant="outlined" sx={{ p: 2 }}>
+                        <Stack spacing={1.5}>
+                          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={1}>
+                            <Typography fontWeight={700}>加分与导出</Typography>
+                            <Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadQuestionAnswers}>
+                              答案导出
+                            </Button>
+                          </Stack>
+                          <Grid container spacing={1}>
+                            {Object.entries(bonusSettings).map(([key, value]) => (
+                              <Grid item xs={6} sm={4} key={key}>
+                                <TextField
+                                  size="small"
+                                  label={key}
+                                  type="number"
+                                  value={value}
+                                  onChange={(event) =>
+                                    setBonusSettings((current) => ({ ...current, [key]: event.target.value }))
+                                  }
+                                  fullWidth
+                                />
+                              </Grid>
+                            ))}
+                          </Grid>
+                          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                            <Button variant="outlined" onClick={handleSaveBonusSettings}>
+                              保存加分规则
+                            </Button>
+                            <Button
+                              variant="outlined"
+                              onClick={async () => setBonusSummary(await fetchQuestionBonusSummary(Number(questionSessionId)))}
+                            >
+                              刷新加分
+                            </Button>
+                          </Stack>
+                          {bonusSummary && (
+                            <Stack spacing={0.5}>
+                              {bonusSummary.records.slice(0, 5).map((record) => (
+                                <Typography key={String(record.student_number)} variant="body2" color="text.secondary">
+                                  {String(record.student_number)} {String(record.student_name)}：{String(record.total_score ?? 0)} 分
+                                </Typography>
+                              ))}
+                              {bonusSummary.records.length === 0 && <Typography color="text.secondary">暂无加分记录。</Typography>}
+                            </Stack>
+                          )}
+                        </Stack>
+                      </Paper>
+                    )}
                     <Paper variant="outlined" sx={{ p: 2, minHeight: 220 }}>
                       <Stack spacing={1.5}>
                         {questions.map((item) => (
@@ -1685,6 +2283,12 @@ export function TeacherPage() {
                                 </Typography>
                               ))}
                             </Stack>
+                          )}
+                          {anonymousStats && (
+                            <Alert severity="info">
+                              匿名统计：已提交 {String(anonymousStats.submitted_count ?? 0)} 人，正确率{" "}
+                              {String(anonymousStats.correct_rate ?? 0)}%。
+                            </Alert>
                           )}
                           {questionStats.typical_answers.length > 0 && (
                             <Stack spacing={0.5}>
@@ -1797,11 +2401,38 @@ export function TeacherPage() {
                                   {item.status} / 截止 {item.deadline}
                                   {item.allow_late ? " / 允许迟交" : ""}
                                 </Typography>
+                                <Typography color="text.secondary" variant="body2">
+                                  教师附件：{item.attachments?.length ?? 0} 个
+                                </Typography>
                               </Box>
-                              <Button size="small" variant="outlined" onClick={() => handleLoadHomeworkSummary(item.id)}>
-                                提交列表
-                              </Button>
+                              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                <Button component="label" size="small" variant="outlined">
+                                  附件
+                                  <input
+                                    type="file"
+                                    multiple
+                                    hidden
+                                    onChange={(event) =>
+                                      setHomeworkAttachmentFiles((current) => ({
+                                        ...current,
+                                        [item.id]: event.target.files ? Array.from(event.target.files) : []
+                                      }))
+                                    }
+                                  />
+                                </Button>
+                                <Button size="small" variant="outlined" onClick={() => handleAddHomeworkAttachments(item.id)}>
+                                  上传
+                                </Button>
+                                <Button size="small" variant="outlined" onClick={() => handleLoadHomeworkSummary(item.id)}>
+                                  提交列表
+                                </Button>
+                              </Stack>
                             </Stack>
+                            {(homeworkAttachmentFiles[item.id]?.length ?? 0) > 0 && (
+                              <Typography color="text.secondary" variant="body2" sx={{ mt: 0.75 }}>
+                                待上传：{homeworkAttachmentFiles[item.id].map((file) => file.name).join("，")}
+                              </Typography>
+                            )}
                           </Box>
                         ))}
                         {homeworkList.length === 0 && (
@@ -1820,6 +2451,17 @@ export function TeacherPage() {
                               {homeworkSummary.stats.not_submitted}，迟交 {homeworkSummary.stats.late}
                             </Typography>
                           </Box>
+                          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                            <Button variant="outlined" startIcon={<PsychologyIcon />} onClick={() => handleStartHomeworkAiReview(homeworkSummary.homework.id)}>
+                              AI 批阅
+                            </Button>
+                            <Button variant="outlined" onClick={() => handlePublishHomeworkGrades(homeworkSummary.homework.id)}>
+                              发布成绩
+                            </Button>
+                            <Button variant="outlined" startIcon={<DownloadIcon />} onClick={() => handleDownloadHomework(homeworkSummary.homework.id)}>
+                              导出
+                            </Button>
+                          </Stack>
                           <Table size="small" stickyHeader>
                             <TableHead>
                               <TableRow>
@@ -1828,6 +2470,7 @@ export function TeacherPage() {
                                 <TableCell>状态</TableCell>
                                 <TableCell>版本</TableCell>
                                 <TableCell>提交时间</TableCell>
+                                <TableCell>评分</TableCell>
                                 <TableCell>内容/附件</TableCell>
                               </TableRow>
                             </TableHead>
@@ -1839,6 +2482,44 @@ export function TeacherPage() {
                                   <TableCell>{record.submission_status}</TableCell>
                                   <TableCell>{record.submit_version ?? "-"}</TableCell>
                                   <TableCell>{record.submitted_at ?? "-"}</TableCell>
+                                  <TableCell sx={{ minWidth: 220 }}>
+                                    {record.submission_id ? (
+                                      <Stack spacing={1}>
+                                        <Typography variant="body2" color="text.secondary">
+                                          AI {record.ai_score ?? "-"} / 最终 {record.final_score ?? "-"}
+                                        </Typography>
+                                        <TextField
+                                          size="small"
+                                          label="复核分"
+                                          type="number"
+                                          value={reviewScores[record.submission_id] ?? record.final_score ?? record.ai_score ?? ""}
+                                          onChange={(event) =>
+                                            setReviewScores((current) => ({ ...current, [record.submission_id as number]: event.target.value }))
+                                          }
+                                        />
+                                        <TextField
+                                          size="small"
+                                          label="反馈"
+                                          value={reviewFeedback[record.submission_id] ?? record.final_feedback ?? ""}
+                                          onChange={(event) =>
+                                            setReviewFeedback((current) => ({
+                                              ...current,
+                                              [record.submission_id as number]: event.target.value
+                                            }))
+                                          }
+                                        />
+                                        <Button
+                                          size="small"
+                                          variant="outlined"
+                                          onClick={() => handleReviewSubmission(record.submission_id as number, homeworkSummary.homework.id)}
+                                        >
+                                          保存复核
+                                        </Button>
+                                      </Stack>
+                                    ) : (
+                                      "-"
+                                    )}
+                                  </TableCell>
                                   <TableCell sx={{ minWidth: 220 }}>
                                     <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
                                       {record.text_content || "-"}

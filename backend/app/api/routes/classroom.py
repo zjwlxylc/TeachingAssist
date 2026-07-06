@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
@@ -12,6 +12,12 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 class StudentSignInRequest(BaseModel):
     student_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+
+
+class SignInStatusRequest(BaseModel):
+    student_pk: int
+    status: str
+    reason: str | None = None
 
 
 @router.post("/sessions/{session_id}/start", response_model=ApiResponse[dict[str, object]])
@@ -60,3 +66,42 @@ def sign_in_summary(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     return ok(classroom_service.get_sign_in_summary(session_id))
+
+
+@router.put("/sessions/{session_id}/sign-ins/status", response_model=ApiResponse[dict[str, object]])
+def update_sign_in_status(
+    session_id: int,
+    payload: SignInStatusRequest,
+    teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(
+        classroom_service.update_sign_in_status(
+            session_id,
+            payload.student_pk,
+            payload.status,
+            payload.reason,
+            str(teacher.get("name") or "教师"),
+        ),
+        message="签到状态已更新",
+    )
+
+
+@router.get("/sessions/{session_id}/sign-ins/logs", response_model=ApiResponse[list[dict[str, object]]])
+def sign_in_logs(
+    session_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[list[dict[str, object]]]:
+    return ok(classroom_service.list_sign_in_change_logs(session_id))
+
+
+@router.get("/sessions/{session_id}/sign-ins.csv")
+def export_sign_ins(
+    session_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> Response:
+    exported = classroom_service.export_sign_ins(session_id)
+    return Response(
+        content=exported["content"],
+        media_type=exported["content_type"],
+        headers={"Content-Disposition": f"attachment; filename={exported['file_name']}"},
+    )

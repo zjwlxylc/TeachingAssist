@@ -1,5 +1,5 @@
 import { ClassroomSession } from "./academic";
-import { request } from "./http";
+import { downloadFile, request } from "./http";
 
 export interface SignInRecord {
   student_pk: number;
@@ -52,6 +52,21 @@ export function endClassroomSession(sessionId: number) {
 
 export function fetchSignInSummary(sessionId: number) {
   return request<SignInSummary>(`/classroom/sessions/${sessionId}/sign-ins`);
+}
+
+export function updateSignInStatus(sessionId: number, studentPk: number, status: "normal" | "late" | "absent", reason?: string) {
+  return request<SignInSummary>(`/classroom/sessions/${sessionId}/sign-ins/status`, {
+    method: "PUT",
+    body: JSON.stringify({ student_pk: studentPk, status, reason })
+  });
+}
+
+export function fetchSignInLogs(sessionId: number) {
+  return request<Array<Record<string, unknown>>>(`/classroom/sessions/${sessionId}/sign-ins/logs`);
+}
+
+export function downloadSignIns(sessionId: number) {
+  return downloadFile(`/classroom/sessions/${sessionId}/sign-ins.csv`, `session_${sessionId}_sign_ins.csv`);
 }
 
 export function fetchPublicSession(sessionId: number) {

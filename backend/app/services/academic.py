@@ -1,5 +1,7 @@
 import json
+import csv
 from io import BytesIO
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +9,7 @@ from openpyxl import load_workbook
 
 from app.core.exceptions import AppError
 from app.db.session import get_connection
+from app.services import ai as ai_service
 
 
 MAX_EXCEL_SIZE = 10 * 1024 * 1024
@@ -279,6 +282,80 @@ def preview_import(job_id: int, mapping: dict[str, str]) -> dict[str, Any]:
     return preview
 
 
+def suggest_import_mapping(job_id: int) -> dict[str, Any]:
+    job = _load_import_job(job_id)
+    headers = job["headers"]
+    sample_rows = job["rows"][:5]
+    prompt = (
+        "请根据 Excel 表头和前 5 行样例，将原始列名映射到标准字段。"
+        "仅返回 JSON，格式为 {\"mapping\":{\"原始列名\":\"student_id|name|class_name|major|college|grade\"},"
+        "\"confidence\":0.0,\"notes\":\"...\"}。\n"
+        f"标准字段：{json.dumps(STANDARD_FIELDS, ensure_ascii=False)}\n"
+        f"表头：{json.dumps(headers, ensure_ascii=False)}\n"
+        f"样例：{json.dumps(sample_rows, ensure_ascii=False)}"
+    )
+    mapping: dict[str, str] | None = None
+    ai_error: str | None = None
+    try:
+        generated = ai_service.generate_structured_json(
+            "excel_mapping",
+            prompt,
+            source_type="student_import_job",
+            source_id=job_id,
+        )
+        raw_mapping = generated.get("mapping") if isinstance(generated, dict) else None
+        if isinstance(raw_mapping, dict):
+            mapping = {
+                str(source): str(target)
+                for source, target in raw_mapping.items()
+                if source in headers and str(target) in STANDARD_FIELDS
+            }
+    except Exception as exc:
+        ai_error = str(exc)
+        ai_service.record_failure_task(
+            "excel_mapping",
+            "student_import_job",
+            job_id,
+            ai_error,
+            {"headers": headers, "sample_rows": sample_rows},
+        )
+
+    if not mapping:
+        mapping = _heuristic_mapping(headers)
+        return {
+            "mode": "manual_fallback",
+            "message": "AI 不可用，请手动映射" if ai_error else "已按表头生成本地映射建议",
+            "mapping": mapping,
+            "standard_fields": STANDARD_FIELDS,
+        }
+
+    return {
+        "mode": "ai_suggested",
+        "message": "AI 字段映射建议已生成",
+        "mapping": mapping,
+        "standard_fields": STANDARD_FIELDS,
+    }
+
+
+def _heuristic_mapping(headers: list[str]) -> dict[str, str]:
+    aliases = {
+        "student_id": ["学号", "学生编号", "student_id", "student no", "id"],
+        "name": ["姓名", "学生姓名", "name"],
+        "class_name": ["班级", "班级名称", "class", "class_name"],
+        "major": ["专业", "major"],
+        "college": ["学院", "院系", "college"],
+        "grade": ["年级", "grade"],
+    }
+    mapping: dict[str, str] = {}
+    for header in headers:
+        normalized = header.strip().lower()
+        for field, names in aliases.items():
+            if any(alias.lower() in normalized or normalized in alias.lower() for alias in names):
+                mapping[header] = field
+                break
+    return mapping
+
+
 def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
     reverse_mapping = {standard: source for source, standard in mapping.items() if standard}
     missing = sorted(REQUIRED_FIELDS - set(reverse_mapping))
@@ -339,15 +416,25 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
     }
 
 
-def confirm_import(job_id: int, course_id: int, mapping: dict[str, str], import_valid_only: bool = True) -> dict[str, Any]:
+def confirm_import(
+    job_id: int,
+    course_id: int,
+    mapping: dict[str, str],
+    import_valid_only: bool = True,
+    duplicate_strategy: str = "merge",
+) -> dict[str, Any]:
+    if duplicate_strategy not in {"overwrite", "skip", "merge"}:
+        raise AppError("重复学号处理策略不支持", code="IMPORT_DUPLICATE_STRATEGY_INVALID")
     job = _load_import_job(job_id)
     preview = _build_import_preview(job, mapping)
     if preview["error_count"] and not import_valid_only:
         raise AppError("存在错误数据，不能全部导入", code="IMPORT_HAS_ERRORS")
 
     imported = 0
+    updated = 0
     skipped = 0
     failed = 0
+    report_rows: list[dict[str, Any]] = []
     with get_connection() as connection:
         course = connection.execute("SELECT id FROM courses WHERE id = ?", (course_id,)).fetchone()
         if course is None:
@@ -356,6 +443,13 @@ def confirm_import(job_id: int, course_id: int, mapping: dict[str, str], import_
         for row in preview["all_rows"]:
             if not row["valid"]:
                 skipped += 1
+                report_rows.append(
+                    {
+                        "row_number": row["row_number"],
+                        "student_id": row["data"].get("student_id", ""),
+                        "reason": "；".join(row["errors"]),
+                    }
+                )
                 continue
             data = row["data"]
             try:
@@ -373,28 +467,62 @@ def confirm_import(job_id: int, course_id: int, mapping: dict[str, str], import_
                     "INSERT OR IGNORE INTO course_classes(course_id, class_id) VALUES (?, ?)",
                     (course_id, class_id),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO students(student_id, name, class_id, major, college, grade)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(student_id) DO UPDATE SET
-                        name = excluded.name,
-                        class_id = excluded.class_id,
-                        major = excluded.major,
-                        college = excluded.college,
-                        grade = excluded.grade,
-                        is_active = 1,
-                        updated_at = datetime('now')
-                    """,
-                    (
-                        data["student_id"],
-                        data["name"],
-                        class_id,
-                        data.get("major"),
-                        data.get("college"),
-                        data.get("grade"),
-                    ),
-                )
+                existing_student = connection.execute(
+                    "SELECT * FROM students WHERE student_id = ?",
+                    (data["student_id"],),
+                ).fetchone()
+                if existing_student and duplicate_strategy == "skip":
+                    skipped += 1
+                elif existing_student and duplicate_strategy == "merge":
+                    connection.execute(
+                        """
+                        UPDATE students
+                        SET name = COALESCE(NULLIF(?, ''), name),
+                            class_id = ?,
+                            major = COALESCE(NULLIF(?, ''), major),
+                            college = COALESCE(NULLIF(?, ''), college),
+                            grade = COALESCE(NULLIF(?, ''), grade),
+                            is_active = 1,
+                            updated_at = datetime('now')
+                        WHERE student_id = ?
+                        """,
+                        (
+                            data.get("name"),
+                            class_id,
+                            data.get("major"),
+                            data.get("college"),
+                            data.get("grade"),
+                            data["student_id"],
+                        ),
+                    )
+                    updated += 1
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO students(student_id, name, class_id, major, college, grade)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(student_id) DO UPDATE SET
+                            name = excluded.name,
+                            class_id = excluded.class_id,
+                            major = excluded.major,
+                            college = excluded.college,
+                            grade = excluded.grade,
+                            is_active = 1,
+                            updated_at = datetime('now')
+                        """,
+                        (
+                            data["student_id"],
+                            data["name"],
+                            class_id,
+                            data.get("major"),
+                            data.get("college"),
+                            data.get("grade"),
+                        ),
+                    )
+                    if existing_student:
+                        updated += 1
+                    else:
+                        imported += 1
                 student = connection.execute(
                     "SELECT id FROM students WHERE student_id = ?",
                     (data["student_id"],),
@@ -406,16 +534,38 @@ def confirm_import(job_id: int, course_id: int, mapping: dict[str, str], import_
                     """,
                     (course_id, class_id, int(student["id"])),
                 )
-                imported += 1
             except Exception:
                 failed += 1
-    return {"imported": imported, "skipped": skipped, "failed": failed, "total": preview["total_rows"]}
+                report_rows.append(
+                    {
+                        "row_number": row["row_number"],
+                        "student_id": data.get("student_id", ""),
+                        "reason": "写入数据库失败",
+                    }
+                )
+        if report_rows:
+            connection.execute(
+                """
+                INSERT INTO student_import_reports(job_id, report_type, rows_json)
+                VALUES (?, 'error', ?)
+                """,
+                (job_id, json.dumps(report_rows, ensure_ascii=False)),
+            )
+    return {
+        "imported": imported,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "total": preview["total_rows"],
+        "duplicate_strategy": duplicate_strategy,
+        "error_report_available": bool(report_rows),
+    }
 
 
-def list_students(course_id: int | None = None, class_id: int | None = None) -> list[dict[str, Any]]:
+def list_students(course_id: int | None = None, class_id: int | None = None, include_inactive: bool = False) -> list[dict[str, Any]]:
     params: list[Any] = []
     joins = ""
-    where = ["s.is_active = 1"]
+    where = ["1 = 1"] if include_inactive else ["s.is_active = 1"]
     if course_id:
         joins = "JOIN course_students cs ON cs.student_id = s.id"
         where.append("cs.course_id = ?")
@@ -426,7 +576,7 @@ def list_students(course_id: int | None = None, class_id: int | None = None) -> 
     with get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT s.id, s.student_id, s.name, s.major, s.college, s.grade,
+            SELECT s.id, s.student_id, s.name, s.major, s.college, s.grade, s.is_active,
                    s.class_id, cl.name AS class_name, s.created_at, s.updated_at
             FROM students s
             JOIN classes cl ON cl.id = s.class_id
@@ -438,3 +588,57 @@ def list_students(course_id: int | None = None, class_id: int | None = None) -> 
             tuple(params),
         ).fetchall()
     return [_row_to_dict(row) for row in rows]
+
+
+def set_student_active(student_pk: int, is_active: bool) -> dict[str, Any]:
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM students WHERE id = ?", (student_pk,)).fetchone()
+        if row is None:
+            raise AppError("学生不存在", code="STUDENT_NOT_FOUND", status_code=404)
+        connection.execute(
+            "UPDATE students SET is_active = ?, updated_at = datetime('now') WHERE id = ?",
+            (1 if is_active else 0, student_pk),
+        )
+        updated = connection.execute(
+            """
+            SELECT s.id, s.student_id, s.name, s.major, s.college, s.grade, s.is_active,
+                   s.class_id, cl.name AS class_name, s.created_at, s.updated_at
+            FROM students s
+            JOIN classes cl ON cl.id = s.class_id
+            WHERE s.id = ?
+            """,
+            (student_pk,),
+        ).fetchone()
+    return _row_to_dict(updated)
+
+
+def export_import_errors(job_id: int) -> dict[str, Any]:
+    job = _load_import_job(job_id)
+    preview_rows = _build_import_preview(job, _heuristic_mapping(job["headers"]))["all_rows"]
+    report_rows = [
+        {
+            "row_number": row["row_number"],
+            "student_id": row["data"].get("student_id", ""),
+            "reason": "；".join(row["errors"] or row["warnings"]),
+        }
+        for row in preview_rows
+        if row["errors"] or row["warnings"]
+    ]
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=["row_number", "student_id", "reason"])
+    writer.writeheader()
+    writer.writerows(report_rows)
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO student_import_reports(job_id, report_type, rows_json)
+            VALUES (?, 'error', ?)
+            """,
+            (job_id, json.dumps(report_rows, ensure_ascii=False)),
+        )
+    return {
+        "file_name": f"student_import_errors_{job_id}.csv",
+        "content_type": "text/csv",
+        "content": output.getvalue(),
+        "total": len(report_rows),
+    }

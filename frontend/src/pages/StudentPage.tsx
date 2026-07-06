@@ -34,19 +34,44 @@ import { fetchActiveSessions, fetchPublicSession, studentSignIn, StudentSignInRe
 import {
   Question,
   QuestionPublishedMessage,
+  fetchQuestionDraft,
   fetchPublicQuestions,
   submitQuestionAnswer
 } from "../api/questions";
 import {
   Homework,
   HomeworkSubmitResult,
+  fetchHomeworkFeedback,
   fetchPublicHomework,
   submitHomework
 } from "../api/homework";
+import { fetchStudentEvaluationFeedback } from "../api/evaluation";
+import { recordCachedReplay } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 
 type ClassroomMessage = AnnouncementMessage | QuestionPublishedMessage;
+
+type CachedRequest =
+  | {
+      id: string;
+      type: "question";
+      sessionId: number;
+      questionId: number;
+      payload: { student_id: string; name: string; answer: unknown; action: "submit_answer" };
+      createdAt: string;
+    }
+  | {
+      id: string;
+      type: "homework";
+      sessionId: number;
+      homeworkId: number;
+      payload: { student_id: string; name: string; text_content?: string };
+      createdAt: string;
+    };
+
+const CACHE_KEY = "teaching_assist_cached_requests";
+const DRAFT_KEY = "teaching_assist_question_drafts";
 
 const QUESTION_TYPE_LABELS: Record<Question["question_type"], string> = {
   single_choice: "单选题",
@@ -72,6 +97,9 @@ export function StudentPage() {
   const [homeworkText, setHomeworkText] = useState<Record<number, string>>({});
   const [homeworkFiles, setHomeworkFiles] = useState<Record<number, File[]>>({});
   const [submittedHomework, setSubmittedHomework] = useState<Record<number, HomeworkSubmitResult>>({});
+  const [homeworkFeedback, setHomeworkFeedback] = useState<Record<number, Record<string, unknown>>>({});
+  const [evaluationFeedback, setEvaluationFeedback] = useState<Record<string, unknown> | null>(null);
+  const [cachedCount, setCachedCount] = useState(0);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
@@ -79,6 +107,7 @@ export function StudentPage() {
 
   useEffect(() => {
     loadActiveSessions();
+    setCachedCount(readCachedRequests().length);
   }, []);
 
   useEffect(() => {
@@ -118,6 +147,9 @@ export function StudentPage() {
             setQuestions(questionItems);
           }
           setHomeworkList(homeworkItems);
+          restoreLocalDrafts(questionItems);
+          void restoreServerDrafts(questionItems);
+          void replayCachedRequests(sessionId);
         }
       } catch (err) {
         if (!disposed) {
@@ -150,6 +182,7 @@ export function StudentPage() {
         if (lastId) {
           loadMessages(lastId);
         }
+        void replayCachedRequests(sessionId);
       }
     );
     socketRef.current = socket;
@@ -185,6 +218,106 @@ export function StudentPage() {
     }
   }
 
+  function readCachedRequests(): CachedRequest[] {
+    try {
+      return JSON.parse(localStorage.getItem(CACHE_KEY) ?? "[]") as CachedRequest[];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeCachedRequests(items: CachedRequest[]) {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(items));
+    setCachedCount(items.length);
+  }
+
+  function cacheRequest(item: CachedRequest) {
+    const items = readCachedRequests();
+    writeCachedRequests([...items, item]);
+  }
+
+  function readDrafts() {
+    try {
+      return JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "{}") as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  function saveLocalDraft(questionId: number, answer: unknown) {
+    const drafts = readDrafts();
+    drafts[String(questionId)] = answer;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(drafts));
+  }
+
+  function restoreLocalDrafts(questionItems: Question[]) {
+    const drafts = readDrafts();
+    setAnswers((current) => {
+      const next = { ...current };
+      questionItems.forEach((question) => {
+        const value = drafts[String(question.id)];
+        if (value !== undefined && next[question.id] === undefined) {
+          next[question.id] = value as string | string[];
+        }
+      });
+      return next;
+    });
+  }
+
+  async function restoreServerDrafts(questionItems: Question[]) {
+    if (!studentId || !name) {
+      return;
+    }
+    const entries = await Promise.all(
+      questionItems.map(async (question) => {
+        try {
+          const draft = await fetchQuestionDraft(question.id, studentId, name);
+          return [question.id, draft.answer ?? draft.answer_text] as const;
+        } catch {
+          return [question.id, undefined] as const;
+        }
+      })
+    );
+    setAnswers((current) => {
+      const next = { ...current };
+      entries.forEach(([questionId, value]) => {
+        if (value !== undefined && next[questionId] === undefined) {
+          next[questionId] = value as string | string[];
+        }
+      });
+      return next;
+    });
+  }
+
+  async function replayCachedRequests(sessionId: number) {
+    const items = readCachedRequests();
+    const remaining: CachedRequest[] = [];
+    let replayed = 0;
+    for (const item of items) {
+      if (item.sessionId !== sessionId) {
+        remaining.push(item);
+        continue;
+      }
+      try {
+        if (item.type === "question") {
+          await submitQuestionAnswer(item.questionId, item.payload);
+          setSubmittedQuestions((current) => ({ ...current, [item.questionId]: true }));
+        } else {
+          const result = await submitHomework(item.homeworkId, item.payload);
+          setSubmittedHomework((current) => ({ ...current, [item.homeworkId]: result }));
+        }
+        await recordCachedReplay(sessionId, { cached_id: item.id, type: item.type, created_at: item.createdAt });
+        replayed += 1;
+      } catch {
+        remaining.push(item);
+      }
+    }
+    writeCachedRequests(remaining);
+    if (replayed > 0) {
+      setMessage(`已重发 ${replayed} 条离线缓存请求`);
+    }
+  }
+
   async function handleSignIn() {
     const sessionId = currentSession?.id || Number(sessionIdInput);
     if (!sessionId || !studentId || !name) {
@@ -205,10 +338,32 @@ export function StudentPage() {
       if (question.question_type === "multiple_choice") {
         const existing = Array.isArray(current[question.id]) ? (current[question.id] as string[]) : [];
         const next = checked ? [...existing, value] : existing.filter((item) => item !== value);
+        saveLocalDraft(question.id, next);
         return { ...current, [question.id]: next };
       }
+      saveLocalDraft(question.id, value);
       return { ...current, [question.id]: value };
     });
+  }
+
+  async function handleSaveDraft(question: Question) {
+    if (!studentId || !name) {
+      setError("请先填写学号和姓名");
+      return;
+    }
+    try {
+      await submitQuestionAnswer(question.id, {
+        student_id: studentId,
+        name,
+        answer: answers[question.id] ?? "",
+        action: "save_draft"
+      });
+      saveLocalDraft(question.id, answers[question.id] ?? "");
+      setMessage("答题草稿已保存");
+    } catch (err) {
+      saveLocalDraft(question.id, answers[question.id] ?? "");
+      setMessage("网络暂不可用，草稿已保存在本机");
+    }
   }
 
   async function handleSubmitAnswer(question: Question) {
@@ -226,7 +381,20 @@ export function StudentPage() {
       setSubmittedQuestions((current) => ({ ...current, [question.id]: true }));
       setMessage("答案已提交");
     } catch (err) {
-      setError((err as Error).message);
+      cacheRequest({
+        id: `${Date.now()}-${question.id}`,
+        type: "question",
+        sessionId: question.session_id,
+        questionId: question.id,
+        payload: {
+          student_id: studentId,
+          name,
+          answer: answers[question.id] ?? "",
+          action: "submit_answer"
+        },
+        createdAt: new Date().toISOString()
+      });
+      setMessage("网络暂不可用，答案已缓存，重连后会自动重发");
     }
   }
 
@@ -244,6 +412,51 @@ export function StudentPage() {
       });
       setSubmittedHomework((current) => ({ ...current, [homework.id]: result }));
       setMessage(`作业已提交，当前版本 ${result.submit_version}`);
+    } catch (err) {
+      if ((homeworkFiles[homework.id] ?? []).length > 0) {
+        setError("网络异常，带附件的作业无法离线缓存，请恢复网络后重新提交");
+        return;
+      }
+      cacheRequest({
+        id: `${Date.now()}-${homework.id}`,
+        type: "homework",
+        sessionId: homework.session_id,
+        homeworkId: homework.id,
+        payload: {
+          student_id: studentId,
+          name,
+          text_content: homeworkText[homework.id] ?? ""
+        },
+        createdAt: new Date().toISOString()
+      });
+      setMessage("网络暂不可用，作业文本已缓存，重连后会自动重发");
+    }
+  }
+
+  async function handleLoadHomeworkFeedback(homework: Homework) {
+    if (!studentId || !name) {
+      setError("请先填写学号和姓名");
+      return;
+    }
+    try {
+      const feedback = await fetchHomeworkFeedback(homework.id, studentId, name);
+      setHomeworkFeedback((current) => ({ ...current, [homework.id]: feedback }));
+      setMessage(feedback.published ? "作业反馈已获取" : "教师尚未发布该作业成绩");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadEvaluationFeedback() {
+    const sessionId = currentSession?.id || Number(sessionIdInput);
+    if (!sessionId || !studentId || !name) {
+      setError("请先选择课堂并填写学号、姓名");
+      return;
+    }
+    try {
+      const feedback = await fetchStudentEvaluationFeedback(sessionId, studentId, name);
+      setEvaluationFeedback(feedback);
+      setMessage(feedback.evaluation ? "学习反馈已获取" : "教师尚未生成课堂评估");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -359,6 +572,7 @@ export function StudentPage() {
               <Alert severity={currentSession.status === "active" ? "success" : "warning"}>
                 {currentSession.course_name} / {currentSession.class_name} / {currentSession.title}：
                 <Chip size="small" label={currentSession.status} sx={{ ml: 1 }} />
+                {cachedCount > 0 && <Chip size="small" color="warning" label={`待重发 ${cachedCount}`} sx={{ ml: 1 }} />}
               </Alert>
             )}
 
@@ -426,6 +640,9 @@ export function StudentPage() {
                   >
                     提交答案
                   </Button>
+                  <Button variant="outlined" onClick={() => handleSaveDraft(question)} disabled={Boolean(submittedQuestions[question.id])}>
+                    保存草稿
+                  </Button>
                 </Stack>
               </Paper>
             ))}
@@ -469,6 +686,15 @@ export function StudentPage() {
                           评分标准：{homework.grading_criteria}
                         </Typography>
                       )}
+                      {homework.attachments?.length > 0 && (
+                        <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                          {homework.attachments.map((file) => (
+                            <Typography key={file.id} color="text.secondary" variant="body2">
+                              教师附件：{file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
+                            </Typography>
+                          ))}
+                        </Stack>
+                      )}
                     </Box>
                     <TextField
                       label="提交内容"
@@ -499,11 +725,41 @@ export function StudentPage() {
                     <Button variant="contained" startIcon={<SendIcon />} onClick={() => handleSubmitHomework(homework)}>
                       {submitted ? "再次提交" : "提交作业"}
                     </Button>
+                    <Button variant="outlined" onClick={() => handleLoadHomeworkFeedback(homework)}>
+                      查看反馈
+                    </Button>
+                    {homeworkFeedback[homework.id] && (
+                      <Alert severity={homeworkFeedback[homework.id].published ? "success" : "info"}>
+                        {homeworkFeedback[homework.id].published
+                          ? `得分 ${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_score ?? "-")}：${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_feedback ?? "")}`
+                          : "教师尚未发布成绩"}
+                      </Alert>
+                    )}
                   </Stack>
                 </Paper>
               );
             })}
             {homeworkList.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的作业。</Typography>}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Card sx={{ maxWidth: 760 }}>
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Typography variant="h2">学习反馈</Typography>
+            <Button variant="outlined" onClick={handleLoadEvaluationFeedback}>
+              查看课堂评估
+            </Button>
+            {evaluationFeedback?.evaluation ? (
+              <Alert severity="info">
+                总分 {String((evaluationFeedback.evaluation as Record<string, unknown>).total_score)}，
+                等级 {String((evaluationFeedback.evaluation as Record<string, unknown>).level)}：
+                {String((evaluationFeedback.evaluation as Record<string, unknown>).advice ?? "")}
+              </Alert>
+            ) : (
+              <Typography color="text.secondary">教师生成评估后可查看个人课堂反馈。</Typography>
+            )}
           </Stack>
         </CardContent>
       </Card>

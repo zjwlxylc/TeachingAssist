@@ -1,9 +1,12 @@
 import json
+import csv
 from datetime import datetime
+from io import StringIO
 from typing import Any
 
 from app.core.exceptions import AppError
 from app.db.session import get_connection
+from app.services import ai as ai_service
 from app.services.classroom import get_session_public
 from app.services.realtime import manager
 
@@ -223,6 +226,145 @@ def _log_action(
     )
 
 
+def _load_bonus_settings(connection: Any) -> dict[str, Any]:
+    row = connection.execute("SELECT * FROM question_bonus_settings WHERE id = 1").fetchone()
+    if row is None:
+        connection.execute("INSERT OR IGNORE INTO question_bonus_settings(id) VALUES (1)")
+        row = connection.execute("SELECT * FROM question_bonus_settings WHERE id = 1").fetchone()
+    return _row_to_dict(row)
+
+
+def update_bonus_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    participation = float(payload.get("participation_score", 1))
+    correct = float(payload.get("correct_score", 2))
+    timeliness = float(payload.get("timeliness_score", 0.5))
+    timeliness_percent = float(payload.get("timeliness_percent", 30))
+    max_quality = float(payload.get("max_quality_score", 3))
+    session_cap = float(payload.get("session_cap", 20))
+    if min(participation, correct, timeliness, max_quality, session_cap) < 0:
+        raise AppError("加分规则不能为负数", code="QUESTION_BONUS_NEGATIVE")
+    if timeliness_percent <= 0 or timeliness_percent > 100:
+        raise AppError("时效比例应在 1 到 100 之间", code="QUESTION_TIMELINESS_PERCENT_INVALID")
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE question_bonus_settings
+            SET participation_score = ?, correct_score = ?, timeliness_score = ?,
+                timeliness_percent = ?, max_quality_score = ?, session_cap = ?,
+                updated_at = datetime('now')
+            WHERE id = 1
+            """,
+            (participation, correct, timeliness, timeliness_percent, max_quality, session_cap),
+        )
+        return _load_bonus_settings(connection)
+
+
+def get_bonus_settings() -> dict[str, Any]:
+    with get_connection() as connection:
+        return _load_bonus_settings(connection)
+
+
+def _recalculate_question_bonus(connection: Any, question_id: int) -> None:
+    question = _load_question(connection, question_id)
+    settings = _load_bonus_settings(connection)
+    submitted = connection.execute(
+        """
+        SELECT *
+        FROM question_answers
+        WHERE question_id = ? AND is_latest = 1 AND status IN ('submitted', 'timeout')
+        ORDER BY submitted_at, id
+        """,
+        (question_id,),
+    ).fetchall()
+    timeliness_count = int(len(submitted) * float(settings["timeliness_percent"]) / 100 + 0.9999)
+    for index, answer in enumerate(submitted):
+        participation = float(settings["participation_score"])
+        correct = float(settings["correct_score"]) if answer["is_correct"] == 1 else 0
+        timeliness = float(settings["timeliness_score"]) if index < timeliness_count else 0
+        quality = min(float(answer["quality_score"] or 0), float(settings["max_quality_score"]))
+        total = participation + correct + timeliness + quality
+        details = {
+            "question_type": question["question_type"],
+            "timeliness_rank": index + 1,
+            "timeliness_count": timeliness_count,
+        }
+        connection.execute(
+            """
+            INSERT INTO question_bonus_records(
+                answer_id, session_id, question_id, student_id, participation_score, correct_score,
+                timeliness_score, quality_score, total_score, details_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(answer_id) DO UPDATE SET
+                participation_score = excluded.participation_score,
+                correct_score = excluded.correct_score,
+                timeliness_score = excluded.timeliness_score,
+                quality_score = excluded.quality_score,
+                total_score = excluded.total_score,
+                details_json = excluded.details_json,
+                updated_at = datetime('now')
+            """,
+            (
+                answer["id"],
+                answer["session_id"],
+                answer["question_id"],
+                answer["student_id"],
+                participation,
+                correct,
+                timeliness,
+                quality,
+                total,
+                json.dumps(details, ensure_ascii=False),
+            ),
+        )
+        connection.execute(
+            "UPDATE question_answers SET bonus_total = ? WHERE id = ?",
+            (total, answer["id"]),
+        )
+
+
+def _generate_short_answer_feedback(connection: Any, answer_id: int, question: dict[str, Any], answer_text: str) -> dict[str, Any]:
+    try:
+        feedback = ai_service.generate_structured_json(
+            "short_answer_feedback",
+            (
+                "请批阅学生简答题，返回 JSON："
+                "{\"strengths\":[\"...\"],\"problems\":[\"...\"],\"suggestions\":[\"...\"],"
+                "\"comment\":\"...\",\"quality_score\":0-3}。\n"
+                f"题目：{question['content']}\n参考答案：{question.get('correct_answer') or ''}\n学生答案：{answer_text}"
+            ),
+            source_type="question_answer",
+            source_id=answer_id,
+        )
+        quality_score = max(0, min(3, float(feedback.get("quality_score") or 0)))
+        connection.execute(
+            """
+            UPDATE question_answers
+            SET ai_feedback_status = 'completed', ai_feedback_json = ?, quality_score = ?, updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (json.dumps(feedback, ensure_ascii=False), quality_score, answer_id),
+        )
+        return {"status": "completed", "feedback": feedback, "quality_score": quality_score}
+    except Exception as exc:
+        ai_service.record_failure_task(
+            "short_answer_feedback",
+            "question_answer",
+            answer_id,
+            str(exc),
+            {"question_id": question["id"]},
+        )
+        connection.execute(
+            """
+            UPDATE question_answers
+            SET ai_feedback_status = 'pending_manual', updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (answer_id,),
+        )
+        return {"status": "pending_manual", "message": "AI 不可用，已标记为待教师批阅"}
+
+
 async def create_question(session_id: int, payload: dict[str, Any], teacher_name: str = "教师") -> dict[str, Any]:
     _validate_session_active(session_id)
     data = _validate_payload(payload)
@@ -405,9 +547,9 @@ async def submit_answer(
             """
             INSERT INTO question_answers(
                 question_id, session_id, student_id, answer_json, answer_text, status,
-                is_correct, score, submit_version, is_latest, started_at, submitted_at
+                is_correct, score, submit_version, is_latest, started_at, submitted_at, is_draft, ai_feedback_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """,
             (
                 question_id,
@@ -421,8 +563,16 @@ async def submit_answer(
                 submit_version,
                 _to_db_time(now) if action == "start_answer" else None,
                 _to_db_time(now) if status in {"submitted", "timeout"} else None,
+                1 if status == "draft" else 0,
+                "pending" if question["question_type"] == "short_answer" and status == "submitted" else "none",
             ),
         )
+        answer_id = int(cursor.lastrowid)
+        feedback_result: dict[str, Any] | None = None
+        if question["question_type"] == "short_answer" and status == "submitted":
+            feedback_result = _generate_short_answer_feedback(connection, answer_id, question, answer_text)
+        if status in {"submitted", "timeout"}:
+            _recalculate_question_bonus(connection, question_id)
         _log_action(connection, int(question["session_id"]), question_id, int(student["id"]), action, {"status": status})
         row = connection.execute(
             """
@@ -431,9 +581,11 @@ async def submit_answer(
             JOIN students s ON s.id = qa.student_id
             WHERE qa.id = ?
             """,
-            (cursor.lastrowid,),
+            (answer_id,),
         ).fetchone()
         result = _row_to_dict(row)
+        if feedback_result:
+            result["ai_feedback"] = feedback_result
 
     await manager.broadcast(
         int(question["session_id"]),
@@ -443,8 +595,19 @@ async def submit_answer(
             "question_id": question_id,
             "student_id": result["student_number"],
             "status": result["status"],
+            "ai_feedback_status": result.get("ai_feedback_status"),
         },
     )
+    if result.get("ai_feedback_status") == "completed":
+        await manager.broadcast(
+            int(question["session_id"]),
+            {
+                "type": "question.feedback.ready",
+                "session_id": int(question["session_id"]),
+                "question_id": question_id,
+                "student_id": result["student_number"],
+            },
+        )
     return result
 
 
@@ -507,3 +670,106 @@ def get_question_stats(question_id: int) -> dict[str, Any]:
         "typical_answers": typical_answers,
         "answers": answer_items[:100],
     }
+
+
+def get_anonymous_question_stats(question_id: int) -> dict[str, Any]:
+    stats = get_question_stats(question_id)
+    stats.pop("answers", None)
+    stats["anonymous"] = True
+    return stats
+
+
+def get_student_draft(question_id: int, student_number: str, name: str) -> dict[str, Any]:
+    with get_connection() as connection:
+        question = _load_question(connection, question_id)
+        session = get_session_public(int(question["session_id"]))
+        student = _resolve_student(connection, session, student_number, name)
+        row = connection.execute(
+            """
+            SELECT *
+            FROM question_answers
+            WHERE question_id = ? AND student_id = ? AND is_latest = 1 AND status = 'draft'
+            """,
+            (question_id, student["id"]),
+        ).fetchone()
+    deadline = _parse_time(question.get("deadline"))
+    expired = bool(deadline and datetime.now() > deadline)
+    return {
+        "question_id": question_id,
+        "student_id": student_number,
+        "draft": _row_to_dict(row) if row else None,
+        "expired": expired,
+        "message": "题目已截止" if expired and row else None,
+    }
+
+
+def export_question_answers(session_id: int) -> dict[str, Any]:
+    get_session_public(session_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT s.student_id AS student_number, s.name AS student_name,
+                   q.id AS question_id, q.title AS question_title, q.question_type,
+                   qa.answer_text, qa.status, qa.is_correct, qa.score, qa.bonus_total, qa.submitted_at
+            FROM questions q
+            LEFT JOIN question_answers qa ON qa.question_id = q.id AND qa.is_latest = 1
+            LEFT JOIN students s ON s.id = qa.student_id
+            WHERE q.session_id = ?
+            ORDER BY q.id, s.student_id
+            """,
+            (session_id,),
+        ).fetchall()
+    output = StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "student_number",
+            "student_name",
+            "question_id",
+            "question_title",
+            "question_type",
+            "answer_text",
+            "status",
+            "is_correct",
+            "score",
+            "bonus_total",
+            "submitted_at",
+        ],
+    )
+    writer.writeheader()
+    writer.writerows([_row_to_dict(row) for row in rows])
+    return {
+        "file_name": f"question_answers_session_{session_id}.csv",
+        "content_type": "text/csv",
+        "content": output.getvalue(),
+        "total": len(rows),
+    }
+
+
+def get_session_bonus_summary(session_id: int) -> dict[str, Any]:
+    with get_connection() as connection:
+        settings = _load_bonus_settings(connection)
+        rows = connection.execute(
+            """
+            SELECT s.student_id AS student_number, s.name AS student_name,
+                   SUM(qbr.participation_score) AS participation_score,
+                   SUM(qbr.correct_score) AS correct_score,
+                   SUM(qbr.timeliness_score) AS timeliness_score,
+                   SUM(qbr.quality_score) AS quality_score,
+                   SUM(qbr.total_score) AS raw_total
+            FROM question_bonus_records qbr
+            JOIN students s ON s.id = qbr.student_id
+            WHERE qbr.session_id = ?
+            GROUP BY qbr.student_id
+            ORDER BY s.student_id
+            """,
+            (session_id,),
+        ).fetchall()
+    cap = float(settings["session_cap"])
+    items = []
+    for row in rows:
+        item = _row_to_dict(row)
+        raw_total = float(item.get("raw_total") or 0)
+        item["total_score"] = min(raw_total, cap)
+        items.append(item)
+    return {"settings": settings, "records": items}

@@ -1,4 +1,6 @@
+import csv
 from datetime import datetime, timedelta
+from io import StringIO
 from typing import Any
 
 from app.core.exceptions import AppError
@@ -50,8 +52,9 @@ def _roster_count(connection: Any, session: dict[str, Any]) -> int:
     row = connection.execute(
         """
         SELECT COUNT(*) AS total
-        FROM course_students
-        WHERE course_id = ? AND class_id = ?
+        FROM course_students cs
+        JOIN students s ON s.id = cs.student_id
+        WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
         """,
         (session["course_id"], session["class_id"]),
     ).fetchone()
@@ -94,7 +97,8 @@ def _end_session_in_connection(connection: Any, session: dict[str, Any], ended_a
         INSERT OR IGNORE INTO sign_in_records(session_id, student_id, status)
         SELECT ?, cs.student_id, 'absent'
         FROM course_students cs
-        WHERE cs.course_id = ? AND cs.class_id = ?
+        JOIN students s ON s.id = cs.student_id
+        WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
         """,
         (session["id"], session["course_id"], session["class_id"]),
     )
@@ -169,6 +173,12 @@ def end_session(session_id: int) -> dict[str, Any]:
             backup_results = create_backup("class_ended")
         except Exception as exc:
             backup_results = [{"status": "failed", "message": str(exc)}]
+    try:
+        from app.services.evaluation import calculate_session
+
+        calculate_session(session_id, "temporary")
+    except Exception:
+        pass
     result = get_sign_in_summary(session_id)
     result["backup_results"] = backup_results
     return result
@@ -188,11 +198,12 @@ def list_active_sessions() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT s.*, c.name AS course_name, cl.name AS class_name,
-                   COUNT(cs.student_id) AS roster_count
+                   COUNT(st.id) AS roster_count
             FROM classroom_sessions s
             JOIN courses c ON c.id = s.course_id
             JOIN classes cl ON cl.id = s.class_id
             LEFT JOIN course_students cs ON cs.course_id = s.course_id AND cs.class_id = s.class_id
+            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
             WHERE s.status = 'active'
             GROUP BY s.id
             ORDER BY COALESCE(s.actual_started_at, s.start_time, s.created_at) DESC, s.id DESC
@@ -285,7 +296,7 @@ def get_sign_in_summary(session_id: int) -> dict[str, Any]:
             JOIN students s ON s.id = cs.student_id
             JOIN classes cl ON cl.id = s.class_id
             LEFT JOIN sign_in_records r ON r.session_id = ? AND r.student_id = s.id
-            WHERE cs.course_id = ? AND cs.class_id = ?
+            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
             ORDER BY s.student_id
             """,
             (session_id, session["course_id"], session["class_id"]),
@@ -309,4 +320,97 @@ def get_sign_in_summary(session_id: int) -> dict[str, Any]:
             "unsigned": unsigned,
         },
         "records": records,
+    }
+
+
+def update_sign_in_status(
+    session_id: int,
+    student_pk: int,
+    status: str,
+    reason: str | None = None,
+    operator_name: str | None = None,
+) -> dict[str, Any]:
+    if status not in {"normal", "late", "absent"}:
+        raise AppError("签到状态不支持", code="SIGN_IN_STATUS_UNSUPPORTED")
+    with get_connection() as connection:
+        session = _load_session(connection, session_id)
+        student = connection.execute(
+            """
+            SELECT s.*
+            FROM students s
+            JOIN course_students cs ON cs.student_id = s.id
+            WHERE s.id = ? AND cs.course_id = ? AND cs.class_id = ?
+            """,
+            (student_pk, session["course_id"], session["class_id"]),
+        ).fetchone()
+        if student is None:
+            raise AppError("学生不在本课堂名单中", code="STUDENT_NOT_IN_SESSION", status_code=404)
+        previous = connection.execute(
+            "SELECT * FROM sign_in_records WHERE session_id = ? AND student_id = ?",
+            (session_id, student_pk),
+        ).fetchone()
+        previous_status = previous["status"] if previous else None
+        sign_time = _to_db_time(_now()) if status in {"normal", "late"} else None
+        connection.execute(
+            """
+            INSERT INTO sign_in_records(session_id, student_id, status, sign_time)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id, student_id) DO UPDATE SET
+                status = excluded.status,
+                sign_time = excluded.sign_time,
+                updated_at = datetime('now')
+            """,
+            (session_id, student_pk, status, sign_time),
+        )
+        connection.execute(
+            """
+            INSERT INTO sign_in_change_logs(session_id, student_id, previous_status, new_status, reason, operator_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, student_pk, previous_status, status, reason, operator_name or "教师"),
+        )
+    return get_sign_in_summary(session_id)
+
+
+def list_sign_in_change_logs(session_id: int) -> list[dict[str, Any]]:
+    get_session_public(session_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT l.*, s.student_id AS student_number, s.name AS student_name
+            FROM sign_in_change_logs l
+            JOIN students s ON s.id = l.student_id
+            WHERE l.session_id = ?
+            ORDER BY l.created_at DESC, l.id DESC
+            LIMIT 200
+            """,
+            (session_id,),
+        ).fetchall()
+    return [_row_to_dict(row) for row in rows]
+
+
+def export_sign_ins(session_id: int) -> dict[str, Any]:
+    summary = get_sign_in_summary(session_id)
+    output = StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["student_number", "student_name", "class_name", "status", "sign_time", "ip_address"],
+    )
+    writer.writeheader()
+    for record in summary["records"]:
+        writer.writerow(
+            {
+                "student_number": record["student_number"],
+                "student_name": record["student_name"],
+                "class_name": record["class_name"],
+                "status": record.get("status") or "absent",
+                "sign_time": record.get("sign_time") or "",
+                "ip_address": record.get("ip_address") or "",
+            }
+        )
+    return {
+        "file_name": f"sign_in_session_{session_id}.csv",
+        "content_type": "text/csv",
+        "content": output.getvalue(),
+        "total": len(summary["records"]),
     }

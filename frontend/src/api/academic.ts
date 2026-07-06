@@ -1,4 +1,4 @@
-import { request } from "./http";
+import { downloadFile, request } from "./http";
 
 export interface Course {
   id: number;
@@ -44,6 +44,7 @@ export interface Student {
   major: string | null;
   college: string | null;
   grade: string | null;
+  is_active: number;
 }
 
 export interface ImportJob {
@@ -125,12 +126,31 @@ export function createSession(payload: {
   });
 }
 
-export function fetchStudents(courseId?: number, classId?: number) {
+export function fetchStudents(courseId?: number, classId?: number, includeInactive = false) {
   const params = new URLSearchParams();
   if (courseId) params.set("course_id", String(courseId));
   if (classId) params.set("class_id", String(classId));
+  if (includeInactive) params.set("include_inactive", "true");
   const query = params.toString();
   return request<Student[]>(`/academic/students${query ? `?${query}` : ""}`);
+}
+
+export function setStudentActive(studentPk: number, isActive: boolean) {
+  return request<Student>(`/academic/students/${studentPk}/active`, {
+    method: "PUT",
+    body: JSON.stringify({ is_active: isActive })
+  });
+}
+
+export function suggestStudentImportMapping(jobId: number) {
+  return request<{
+    mode: string;
+    message: string;
+    mapping: Record<string, string>;
+    standard_fields: Record<string, string>;
+  }>(`/academic/imports/${jobId}/mapping-suggestion`, {
+    method: "POST"
+  });
 }
 
 export async function uploadStudentExcel(file: File) {
@@ -154,13 +174,23 @@ export function confirmStudentImport(
   jobId: number,
   courseId: number,
   mapping: Record<string, string>,
-  importValidOnly = true
+  importValidOnly = true,
+  duplicateStrategy: "overwrite" | "skip" | "merge" = "merge"
 ) {
-  return request<{ imported: number; skipped: number; failed: number; total: number }>(
+  return request<{ imported: number; updated: number; skipped: number; failed: number; total: number }>(
     `/academic/imports/${jobId}/confirm`,
     {
       method: "POST",
-      body: JSON.stringify({ course_id: courseId, mapping, import_valid_only: importValidOnly })
+      body: JSON.stringify({
+        course_id: courseId,
+        mapping,
+        import_valid_only: importValidOnly,
+        duplicate_strategy: duplicateStrategy
+      })
     }
   );
+}
+
+export function downloadImportErrors(jobId: number) {
+  return downloadFile(`/academic/imports/${jobId}/errors.csv`, `student_import_${jobId}_errors.csv`);
 }

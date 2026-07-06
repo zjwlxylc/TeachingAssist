@@ -1,4 +1,4 @@
-import { request } from "./http";
+import { downloadFile, request } from "./http";
 
 export type QuestionType = "single_choice" | "multiple_choice" | "true_false" | "fill_blank" | "short_answer";
 
@@ -38,6 +38,11 @@ export interface QuestionStats {
   option_distribution: Record<string, number>;
   typical_answers: Array<{ answer: string; count: number }>;
   answers: Array<Record<string, unknown>>;
+}
+
+export interface BonusSummary {
+  settings: Record<string, number | string>;
+  records: Array<Record<string, unknown>>;
 }
 
 export interface QuestionPublishedMessage {
@@ -99,4 +104,34 @@ export function submitQuestionAnswer(
 
 export function fetchQuestionStats(questionId: number) {
   return request<QuestionStats>(`/questions/${questionId}/stats`);
+}
+
+export function fetchAnonymousQuestionStats(questionId: number) {
+  return request<Omit<QuestionStats, "answers"> & { anonymous: boolean }>(`/questions/${questionId}/stats/anonymous`);
+}
+
+export function fetchQuestionDraft(questionId: number, studentId: string, name: string) {
+  return request<Record<string, unknown>>(`/questions/${questionId}/draft`, {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId, name })
+  });
+}
+
+export function fetchQuestionBonusSummary(sessionId: number) {
+  return request<BonusSummary>(`/questions/sessions/${sessionId}/bonus`);
+}
+
+export function fetchQuestionBonusSettings() {
+  return request<Record<string, number | string>>("/questions/bonus/settings");
+}
+
+export function updateQuestionBonusSettings(payload: Record<string, number>) {
+  return request<Record<string, number | string>>("/questions/bonus/settings", {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function downloadQuestionAnswers(sessionId: number) {
+  return downloadFile(`/questions/sessions/${sessionId}/answers.csv`, `session_${sessionId}_answers.csv`);
 }

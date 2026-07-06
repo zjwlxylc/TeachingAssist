@@ -259,6 +259,90 @@ def _check_provider_remote(provider: dict[str, Any]) -> tuple[str, str, int]:
         return "unavailable", "AI 自检失败", latency_ms
 
 
+def _post_chat_completion(provider: dict[str, Any], messages: list[dict[str, str]], response_format: dict[str, str] | None = None) -> str:
+    if not provider.get("enabled") or not provider.get("api_key"):
+        raise AppError("AI 不可用，系统进入降级模式", code="AI_UNAVAILABLE")
+    payload: dict[str, Any] = {
+        "model": provider["model_name"],
+        "messages": messages,
+        "temperature": 0.2,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        f"{str(provider['base_url']).rstrip('/')}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {provider['api_key']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    proxy = str(provider.get("http_proxy") or "").strip()
+    opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}) if proxy else ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=DEFAULT_TIMEOUT_SECONDS * 3) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise AppError("API Key 无效或无权限", code="AI_AUTH_FAILED") from exc
+        if exc.code == 429:
+            raise AppError("AI 服务限流或额度不足", code="AI_RATE_LIMITED") from exc
+        raise AppError(f"AI 调用失败：HTTP {exc.code}", code="AI_REQUEST_FAILED") from exc
+    except (URLError, TimeoutError) as exc:
+        raise AppError("AI 网络不可达或请求超时", code="AI_NETWORK_FAILED") from exc
+
+    data = json.loads(raw)
+    try:
+        return str(data["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AppError("AI 返回格式异常", code="AI_RESPONSE_INVALID") from exc
+
+
+def generate_structured_json(
+    scenario: str,
+    prompt: str,
+    source_type: str | None = None,
+    source_id: int | None = None,
+    retries: int = 2,
+) -> dict[str, Any]:
+    with get_connection() as connection:
+        provider = _active_provider(connection)
+    if provider is None:
+        raise AppError("未配置 AI Provider", code="AI_PROVIDER_NOT_CONFIGURED")
+
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            content = _post_chat_completion(
+                provider,
+                [
+                    {"role": "system", "content": "你是大学课堂教学辅助系统的 JSON 输出助手。只输出合法 JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                {"type": "json_object"},
+            )
+            safety = check_content_safety(content, source_type or scenario, source_id)
+            if safety["blocked"]:
+                raise AppError("AI 返回内容未通过安全检查", code="AI_CONTENT_BLOCKED")
+            parsed = json.loads(safety["text"])
+            if not isinstance(parsed, dict):
+                raise AppError("AI 返回不是 JSON 对象", code="AI_JSON_OBJECT_REQUIRED")
+            return parsed
+        except Exception as exc:
+            last_error = exc
+            logger.info("AI structured generation retry scenario=%s attempt=%s", scenario, attempt + 1)
+    raise AppError(str(last_error or "AI 结构化生成失败"), code="AI_GENERATION_FAILED")
+
+
+def is_ai_available() -> bool:
+    with get_connection() as connection:
+        provider = _active_provider(connection)
+    return bool(provider and provider.get("enabled") and provider.get("api_key"))
+
+
 def check_connectivity(provider_id: int | None = None) -> dict[str, Any]:
     with get_connection() as connection:
         if provider_id is None:
