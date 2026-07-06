@@ -25,15 +25,17 @@
 - `README.md`
 - `docs/phase-1-delivery.md`
 - `docs/phase-2-delivery.md`
+- `docs/phase-3-delivery.md`
 
 当前已完成：
 
 - 阶段 1：项目基础框架搭建
 - 阶段 2：系统管理与部署基础
+- 阶段 3：课程、班级、课堂与学生导入
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 3：课程与班级基础数据
+- 阶段 4：课堂状态机与签到系统
 
 ## 技术栈
 
@@ -83,6 +85,7 @@ backend/
       response.py      统一 API 响应模型
     services/
       auth.py          教师密码、登录令牌与鉴权服务
+      academic.py      课程、班级、课堂与学生导入服务
       backup.py        本地与可移动盘备份、恢复服务
       network.py       网卡候选地址、端口与防火墙引导
       startup.py       启动检查、目录初始化、U 盘路径识别、自动备份任务
@@ -112,6 +115,7 @@ scripts/
 docs/
   phase-1-delivery.md  阶段 1 交付说明
   phase-2-delivery.md  阶段 2 交付说明
+  phase-3-delivery.md  阶段 3 交付说明
 ```
 
 ## 后端运行
@@ -293,6 +297,21 @@ POST /api/v1/auth/setup
 POST /api/v1/auth/login
 GET  /api/v1/system/access
 POST /api/v1/system/backups
+```
+
+阶段 3 课前准备接口：
+
+```text
+GET  /api/v1/academic/courses
+POST /api/v1/academic/courses
+GET  /api/v1/academic/classes
+POST /api/v1/academic/classes
+POST /api/v1/academic/course-classes
+GET  /api/v1/academic/sessions
+POST /api/v1/academic/sessions
+POST /api/v1/academic/imports/excel
+POST /api/v1/academic/imports/{job_id}/preview
+POST /api/v1/academic/imports/{job_id}/confirm
 ```
 
 ## 运行中产生的本地文件

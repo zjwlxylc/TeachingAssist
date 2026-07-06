@@ -1,6 +1,6 @@
 # 大学教学过程辅助软件
 
-本仓库当前已完成“阶段 1：项目基础框架搭建”和“阶段 2：系统管理与部署基础”，提供可运行的 FastAPI 后端、React/Vite 前端、SQLite 初始化与迁移、教师认证、网卡端口检测、防火墙引导、数据库备份恢复基础能力和健康检查接口。
+本仓库当前已完成“阶段 1：项目基础框架搭建”“阶段 2：系统管理与部署基础”和“阶段 3：课程、班级、课堂与学生导入”，提供可运行的 FastAPI 后端、React/Vite 前端、SQLite 初始化与迁移、教师认证、网卡端口检测、防火墙引导、数据库备份恢复基础能力、课前准备和学生名单导入能力。
 
 ## 技术栈
 
@@ -68,6 +68,17 @@ GET  /api/v1/system/access
 POST /api/v1/system/backups
 ```
 
+课前准备：
+
+```text
+GET  /api/v1/academic/courses
+POST /api/v1/academic/courses
+GET  /api/v1/academic/classes
+POST /api/v1/academic/classes
+POST /api/v1/academic/sessions
+POST /api/v1/academic/imports/excel
+```
+
 ## 前端开发
 
 ```powershell
@@ -121,3 +132,13 @@ SQLite 启动参数：
 - 备份恢复前安全副本：已完成
 
 阶段说明见 `docs/phase-2-delivery.md`。
+
+## 阶段 3 交付状态
+
+- 创建课程、班级和课程班级关联：已完成
+- 创建课堂并记录课次/补课标记：已完成
+- `.xlsx` 学生名单上传、表头读取、样例展示：已完成
+- 手动字段映射、校验预览、确认导入：已完成
+- 学生数据可按课程用于后续签到校验：已完成
+
+阶段说明见 `docs/phase-3-delivery.md`。
