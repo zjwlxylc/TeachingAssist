@@ -23,4 +23,9 @@ def choose_port() -> int:
 
 if __name__ == "__main__":
     settings = get_settings()
-    uvicorn.run("app.main:app", host=settings.server.host, port=choose_port(), reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host=settings.server.host,
+        port=choose_port(),
+        reload=settings.environment == "development",
+    )

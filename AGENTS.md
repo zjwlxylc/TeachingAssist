@@ -32,6 +32,7 @@
 - `docs/phase-7-delivery.md`
 - `docs/phase-8-delivery.md`
 - `docs/phase-9-delivery.md`
+- `docs/phase-10-delivery.md`
 
 当前已完成：
 
@@ -44,10 +45,13 @@
 - 阶段 7：作业管理 P0
 - 阶段 8：AI 管理、降级与内容安全
 - 阶段 9：P1 增强功能开发
-
-后续应按实施方案阶段继续推进，通常下一步是：
-
 - 阶段 10：打包、部署与试点
+
+当前实施方案中的阶段开发已推进至阶段 10。后续建议进入真实机房试点、反馈收集和缺陷修复。
+
+- 真实机房试运行
+- 教师和学生反馈整理
+- 根据试点结果修复问题和优化体验
 
 ## 技术栈
 
@@ -139,6 +143,7 @@ docs/
   phase-7-delivery.md  阶段 7 交付说明
   phase-8-delivery.md  阶段 8 交付说明
   phase-9-delivery.md  阶段 9 交付说明
+  phase-10-delivery.md 阶段 10 交付说明
 ```
 
 ## 后端运行
@@ -254,15 +259,14 @@ npm 如遇下载慢，可考虑设置国内 registry，但不要无故改动锁�
 
 ## 后续开发建议
 
-下一阶段建议优先实现：
+后续建议优先推进：
 
-1. 前端构建静态资源并验证后端可托管。
-2. 后端打包为 Windows 可执行程序。
-3. 整合一键启动器、默认配置和 U 盘目录结构。
-4. 编写教师使用手册、部署检查清单和故障排查手册。
-5. 准备试点反馈报告模板。
+1. 在目标机房按部署检查清单完成真实试运行。
+2. 使用试点反馈报告模板记录教师和学生反馈。
+3. 根据试点问题清单做缺陷修复和体验优化。
+4. 复测局域网访问、断线恢复、备份恢复和 AI 降级场景。
 
-阶段 10 对应交付重点：
+阶段 10 已交付重点：
 
 - Windows 可执行程序
 - U 盘部署包
@@ -448,4 +452,19 @@ POST /api/v1/recovery/sessions/{session_id}/cached-replays
 GET  /api/v1/recovery/sessions/{session_id}/events
 ```
 
-阶段 9 已完成 P1 增强功能开发：导入增强、签到增强、问答增强、作业增强、学习效果评估和恢复增强均已接入后端、前端与文档。下一阶段按实施方案进入“阶段 10：打包、部署与试点”。
+阶段 9 已完成 P1 增强功能开发：导入增强、签到增强、问答增强、作业增强、学习效果评估和恢复增强均已接入后端、前端与文档。
+
+## 阶段 10 打包部署索引
+
+```text
+scripts/build_release.ps1
+scripts/start_teaching_assist.bat
+scripts/make_usb_package.ps1
+backend/requirements-build.txt
+docs/teacher-user-manual.md
+docs/deployment-checklist.md
+docs/troubleshooting.md
+docs/pilot-feedback-report.md
+```
+
+阶段 10 已完成打包、部署与试点准备：前端构建、后端 PyInstaller 打包脚本、启动器、U 盘目录生成、教师使用手册、部署检查清单、故障排查手册和试点反馈模板均已交付。实施方案内阶段已完成，后续进入真实机房试点和反馈修复。

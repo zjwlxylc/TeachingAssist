@@ -1,3 +1,4 @@
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -6,7 +7,13 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+def _project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[3]
+
+
+PROJECT_ROOT = _project_root()
 DEFAULT_LOCAL_ROOT = Path("C:/TeachingAssist")
 
 
