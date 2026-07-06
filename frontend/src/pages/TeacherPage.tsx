@@ -35,6 +35,9 @@ import AddIcon from "@mui/icons-material/Add";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import LinkIcon from "@mui/icons-material/Link";
 import EventIcon from "@mui/icons-material/Event";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
+import FactCheckIcon from "@mui/icons-material/FactCheck";
 
 import {
   ClassGroup,
@@ -68,6 +71,12 @@ import {
   HealthStatus,
   StartupStatus
 } from "../api/system";
+import {
+  SignInSummary,
+  endClassroomSession,
+  fetchSignInSummary,
+  startClassroomSession
+} from "../api/classroom";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
 
@@ -94,6 +103,7 @@ export function TeacherPage() {
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [signInSummary, setSignInSummary] = useState<SignInSummary | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedIp, setSelectedIp] = useState("");
@@ -294,6 +304,37 @@ export function TeacherPage() {
       const result = await confirmStudentImport(importJob.job_id, Number(selectedCourseId), fieldMapping, true);
       await reloadAcademic();
       setMessage(`导入 ${result.imported} 人，跳过 ${result.skipped} 人`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleStartSession(sessionId: number) {
+    try {
+      await startClassroomSession(sessionId);
+      await reloadAcademic();
+      setSignInSummary(await fetchSignInSummary(sessionId));
+      setMessage("课堂已开始");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleEndSession(sessionId: number) {
+    try {
+      const summary = await endClassroomSession(sessionId);
+      await reloadAcademic();
+      setSignInSummary(summary);
+      setMessage("课堂已结束，未签到学生已记为缺勤");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadSignIns(sessionId: number) {
+    try {
+      setSignInSummary(await fetchSignInSummary(sessionId));
+      setMessage("签到统计已刷新");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -654,6 +695,125 @@ export function TeacherPage() {
                     ))}
                     {students.length === 0 && <Typography color="text.secondary">暂无学生</Typography>}
                   </Stack>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Typography variant="h2">课堂运行与签到</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  管理课堂开始、结束和学生签到统计。课堂 ID 可告知学生用于签到。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={6}>
+                  <Stack spacing={1.5}>
+                    {sessions.map((session) => (
+                      <Paper key={session.id} variant="outlined" sx={{ p: 2 }}>
+                        <Stack spacing={1}>
+                          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={1}>
+                            <Box>
+                              <Typography fontWeight={700}>
+                                #{session.id} 第 {session.session_no} 次：{session.title}
+                              </Typography>
+                              <Typography color="text.secondary">
+                                {session.course_name} / {session.class_name} / 名单 {session.roster_count ?? 0} 人
+                              </Typography>
+                            </Box>
+                            <Chip
+                              size="small"
+                              color={
+                                session.status === "active"
+                                  ? "success"
+                                  : session.status === "ended"
+                                    ? "default"
+                                    : "warning"
+                              }
+                              label={session.status}
+                              sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
+                            />
+                          </Stack>
+                          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                            <Button
+                              size="small"
+                              variant="contained"
+                              startIcon={<PlayArrowIcon />}
+                              disabled={session.status !== "pending"}
+                              onClick={() => handleStartSession(session.id)}
+                            >
+                              开始
+                            </Button>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              color="error"
+                              startIcon={<StopCircleIcon />}
+                              disabled={session.status === "ended"}
+                              onClick={() => handleEndSession(session.id)}
+                            >
+                              结束
+                            </Button>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<FactCheckIcon />}
+                              onClick={() => handleLoadSignIns(session.id)}
+                            >
+                              签到统计
+                            </Button>
+                          </Stack>
+                        </Stack>
+                      </Paper>
+                    ))}
+                    {sessions.length === 0 && <Typography color="text.secondary">暂无课堂，请先完成课前准备。</Typography>}
+                  </Stack>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Paper variant="outlined" sx={{ p: 2, minHeight: 240 }}>
+                    {signInSummary ? (
+                      <Stack spacing={2}>
+                        <Box>
+                          <Typography fontWeight={700}>{signInSummary.session.title}</Typography>
+                          <Typography color="text.secondary">
+                            应到 {signInSummary.stats.total}，已签 {signInSummary.stats.signed}，迟到{" "}
+                            {signInSummary.stats.late}，缺勤 {signInSummary.stats.absent}，未处理{" "}
+                            {signInSummary.stats.unsigned}
+                          </Typography>
+                        </Box>
+                        <Paper variant="outlined" sx={{ maxHeight: 320, overflow: "auto" }}>
+                          <Table size="small" stickyHeader>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>学号</TableCell>
+                                <TableCell>姓名</TableCell>
+                                <TableCell>状态</TableCell>
+                                <TableCell>时间</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {signInSummary.records.map((record) => (
+                                <TableRow key={record.student_pk}>
+                                  <TableCell>{record.student_number}</TableCell>
+                                  <TableCell>{record.student_name}</TableCell>
+                                  <TableCell>{record.status ?? "未签到"}</TableCell>
+                                  <TableCell>{record.sign_time ?? "-"}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </Paper>
+                      </Stack>
+                    ) : (
+                      <Typography color="text.secondary">选择一堂课查看实时签到统计。</Typography>
+                    )}
+                  </Paper>
                 </Grid>
               </Grid>
             </Stack>

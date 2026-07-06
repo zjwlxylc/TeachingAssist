@@ -26,16 +26,18 @@
 - `docs/phase-1-delivery.md`
 - `docs/phase-2-delivery.md`
 - `docs/phase-3-delivery.md`
+- `docs/phase-4-delivery.md`
 
 当前已完成：
 
 - 阶段 1：项目基础框架搭建
 - 阶段 2：系统管理与部署基础
 - 阶段 3：课程、班级、课堂与学生导入
+- 阶段 4：课堂状态机与签到系统
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 4：课堂状态机与签到系统
+- 阶段 5：课堂公告、问答或实施方案中下一项课堂互动能力
 
 ## 技术栈
 
@@ -116,6 +118,7 @@ docs/
   phase-1-delivery.md  阶段 1 交付说明
   phase-2-delivery.md  阶段 2 交付说明
   phase-3-delivery.md  阶段 3 交付说明
+  phase-4-delivery.md  阶段 4 交付说明
 ```
 
 ## 后端运行
@@ -333,3 +336,14 @@ POST /api/v1/academic/imports/{job_id}/confirm
 - PowerShell 默认编码有时会导致中文输出乱码，读取中文 Markdown 时使用 `Get-Content -Encoding utf8`。
 - 如果启动前端时根路径短暂返回异常，优先用 `curl.exe http://127.0.0.1:5173/` 或浏览器验证；此前 Vite 日志显示服务正常。
 - 后端配置中的 `app_name` 中文在某些 PowerShell JSON 输出里可能显示为乱码，但 HTTP 实际响应和前端显示正常。
+
+## 阶段 4 接口索引
+
+```text
+POST /api/v1/classroom/sessions/{session_id}/start
+POST /api/v1/classroom/sessions/{session_id}/end
+GET  /api/v1/classroom/sessions/{session_id}/sign-ins
+GET  /api/v1/classroom/sessions/active/list
+GET  /api/v1/classroom/sessions/{session_id}
+POST /api/v1/classroom/sessions/{session_id}/sign-in
+```

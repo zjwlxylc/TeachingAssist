@@ -129,6 +129,9 @@ def link_course_class(course_id: int, class_id: int) -> dict[str, Any]:
 
 
 def list_sessions(course_id: int | None = None) -> list[dict[str, Any]]:
+    from app.services.classroom import refresh_session_statuses
+
+    refresh_session_statuses()
     params: tuple[Any, ...] = ()
     where = ""
     if course_id:
