@@ -1,5 +1,7 @@
 import json
 import csv
+import math
+from datetime import date, datetime
 from io import BytesIO
 from io import StringIO
 from pathlib import Path
@@ -22,10 +24,58 @@ STANDARD_FIELDS = {
     "grade": "年级",
 }
 REQUIRED_FIELDS = {"student_id", "name", "class_name"}
+MAX_NAME_LENGTH = 100
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     return dict(row)
+
+
+def _normalize_cell_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.replace("\ufeff", "").strip()
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return str(int(value))
+        return f"{value:g}".strip()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _normalize_import_field(field: str, value: Any) -> str:
+    text = _normalize_cell_value(value)
+    if field == "student_id" and text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return " ".join(text.split())
+
+
+def _looks_corrupted_text(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    if "\ufffd" in text:
+        return True
+    question_count = text.count("?")
+    visible_count = sum(1 for char in text if not char.isspace())
+    return question_count >= 2 and visible_count > 0 and question_count / visible_count >= 0.3
+
+
+def _validate_display_name(value: str, label: str, code_prefix: str) -> str:
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise AppError(f"{label}不能为空", code=f"{code_prefix}_REQUIRED")
+    if len(normalized) > MAX_NAME_LENGTH:
+        raise AppError(f"{label}不能超过 {MAX_NAME_LENGTH} 个字符", code=f"{code_prefix}_TOO_LONG")
+    if _looks_corrupted_text(normalized):
+        raise AppError(f"{label}疑似乱码，请重新输入", code=f"{code_prefix}_CORRUPTED")
+    return normalized
 
 
 def list_courses() -> list[dict[str, Any]]:
@@ -34,10 +84,11 @@ def list_courses() -> list[dict[str, Any]]:
             """
             SELECT c.id, c.name, c.teacher_id, c.teacher_name, c.created_at, c.updated_at,
                    COUNT(DISTINCT cc.class_id) AS class_count,
-                   COUNT(DISTINCT cs.student_id) AS student_count
+                   COUNT(DISTINCT st.id) AS student_count
             FROM courses c
             LEFT JOIN course_classes cc ON cc.course_id = c.id
             LEFT JOIN course_students cs ON cs.course_id = c.id
+            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
             GROUP BY c.id
             ORDER BY c.updated_at DESC, c.id DESC
             """
@@ -46,9 +97,7 @@ def list_courses() -> list[dict[str, Any]]:
 
 
 def create_course(name: str, teacher_id: int | None, teacher_name: str | None) -> dict[str, Any]:
-    name = name.strip()
-    if not name:
-        raise AppError("课程名称不能为空", code="COURSE_NAME_REQUIRED")
+    name = _validate_display_name(name, "课程名称", "COURSE_NAME")
     with get_connection() as connection:
         cursor = connection.execute(
             """
@@ -90,9 +139,7 @@ def list_classes(course_id: int | None = None) -> list[dict[str, Any]]:
 
 
 def create_class(name: str) -> dict[str, Any]:
-    name = name.strip()
-    if not name:
-        raise AppError("班级名称不能为空", code="CLASS_NAME_REQUIRED")
+    name = _validate_display_name(name, "班级名称", "CLASS_NAME")
     with get_connection() as connection:
         connection.execute(
             """
@@ -144,11 +191,12 @@ def list_sessions(course_id: int | None = None) -> list[dict[str, Any]]:
         rows = connection.execute(
             f"""
             SELECT s.*, c.name AS course_name, cl.name AS class_name,
-                   COUNT(cs.student_id) AS roster_count
+                   COUNT(st.id) AS roster_count
             FROM classroom_sessions s
             JOIN courses c ON c.id = s.course_id
             JOIN classes cl ON cl.id = s.class_id
             LEFT JOIN course_students cs ON cs.course_id = s.course_id AND cs.class_id = s.class_id
+            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
             {where}
             GROUP BY s.id
             ORDER BY COALESCE(s.start_time, s.created_at) DESC, s.id DESC
@@ -161,10 +209,8 @@ def list_sessions(course_id: int | None = None) -> list[dict[str, Any]]:
 def create_session(payload: dict[str, Any]) -> dict[str, Any]:
     course_id = int(payload["course_id"])
     class_id = int(payload["class_id"])
-    title = str(payload["title"]).strip()
+    title = _validate_display_name(str(payload["title"]), "课堂标题", "SESSION_TITLE")
     session_no = int(payload["session_no"])
-    if not title:
-        raise AppError("课堂标题不能为空", code="SESSION_TITLE_REQUIRED")
     if session_no <= 0:
         raise AppError("课次必须大于 0", code="SESSION_NO_INVALID")
 
@@ -218,7 +264,7 @@ def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[s
     if not rows:
         raise AppError("Excel 内容为空", code="EXCEL_EMPTY")
 
-    headers = [str(value).strip() if value is not None else "" for value in rows[0]]
+    headers = [_normalize_cell_value(value) for value in rows[0]]
     if not any(headers):
         raise AppError("Excel 表头为空", code="EXCEL_HEADER_EMPTY")
 
@@ -230,7 +276,7 @@ def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[s
             if not header:
                 continue
             value = row[index] if index < len(row) else None
-            normalized = "" if value is None else str(value).strip()
+            normalized = _normalize_cell_value(value)
             if normalized:
                 has_value = True
             item[header] = normalized
@@ -368,7 +414,7 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
     warnings = 0
     for raw in job["rows"]:
         normalized = {
-            field: str(raw.get(source, "")).strip()
+            field: _normalize_import_field(field, raw.get(source, ""))
             for field, source in reverse_mapping.items()
         }
         row_errors: list[str] = []
@@ -380,6 +426,9 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
             row_errors.append("姓名为空")
         if not normalized.get("class_name"):
             row_errors.append("班级为空")
+        for field in ("name", "class_name"):
+            if _looks_corrupted_text(normalized.get(field, "")):
+                row_errors.append(f"{STANDARD_FIELDS[field]}疑似乱码")
         student_number = normalized.get("student_id", "")
         if student_number:
             if student_number in seen:
@@ -473,6 +522,7 @@ def confirm_import(
                 ).fetchone()
                 if existing_student and duplicate_strategy == "skip":
                     skipped += 1
+                    continue
                 elif existing_student and duplicate_strategy == "merge":
                     connection.execute(
                         """
@@ -529,8 +579,10 @@ def confirm_import(
                 ).fetchone()
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO course_students(course_id, class_id, student_id)
+                    INSERT INTO course_students(course_id, class_id, student_id)
                     VALUES (?, ?, ?)
+                    ON CONFLICT(course_id, student_id) DO UPDATE SET
+                        class_id = excluded.class_id
                     """,
                     (course_id, class_id, int(student["id"])),
                 )

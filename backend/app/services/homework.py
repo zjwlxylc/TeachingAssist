@@ -91,11 +91,11 @@ def _load_homework_attachments(connection: Any, homework_id: int) -> list[dict[s
 
 
 def _refresh_homework_status(connection: Any, homework_id: int | None = None) -> None:
-    where = "status = 'active' AND deadline <= datetime('now') AND allow_late = 0"
-    params: tuple[Any, ...] = ()
+    where = "status = 'active' AND deadline <= ? AND allow_late = 0"
+    params: tuple[Any, ...] = (_to_db_time(_now()),)
     if homework_id is not None:
         where += " AND id = ?"
-        params = (homework_id,)
+        params = (*params, homework_id)
     connection.execute(
         f"UPDATE homework SET status = 'closed', updated_at = datetime('now') WHERE {where}",
         params,
@@ -374,7 +374,7 @@ def get_submission_summary(homework_id: int) -> dict[str, Any]:
             JOIN students s ON s.id = cs.student_id
             LEFT JOIN homework_submissions hs
               ON hs.homework_id = ? AND hs.student_id = s.id AND hs.is_latest = 1
-            WHERE cs.course_id = ? AND cs.class_id = ?
+            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
             ORDER BY s.student_id
             """,
             (homework_id, session["course_id"], session["class_id"]),

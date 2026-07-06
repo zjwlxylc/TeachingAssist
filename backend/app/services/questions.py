@@ -618,8 +618,9 @@ def get_question_stats(question_id: int) -> dict[str, Any]:
         roster = connection.execute(
             """
             SELECT COUNT(*) AS total
-            FROM course_students
-            WHERE course_id = ? AND class_id = ?
+            FROM course_students cs
+            JOIN students s ON s.id = cs.student_id
+            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
             """,
             (session["course_id"], session["class_id"]),
         ).fetchone()

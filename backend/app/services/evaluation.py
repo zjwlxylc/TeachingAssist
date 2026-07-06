@@ -304,7 +304,7 @@ def get_student_feedback(session_id: int, student_number: str, name: str) -> dic
             SELECT s.*
             FROM students s
             JOIN course_students cs ON cs.student_id = s.id
-            WHERE s.student_id = ? AND s.name = ? AND cs.course_id = ? AND cs.class_id = ?
+            WHERE s.student_id = ? AND s.name = ? AND cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
             """,
             (student_number.strip(), name.strip(), session["course_id"], session["class_id"]),
         ).fetchone()
