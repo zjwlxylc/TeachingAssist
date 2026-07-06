@@ -20,6 +20,8 @@ Thumbs.db
 .vscode/
 
 # Local packaged artifacts
+build/
+dist/
 *.zip
 *.7z
 *.exe
