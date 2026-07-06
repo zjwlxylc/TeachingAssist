@@ -29,6 +29,7 @@
 - `docs/phase-4-delivery.md`
 - `docs/phase-5-delivery.md`
 - `docs/phase-6-delivery.md`
+- `docs/phase-7-delivery.md`
 
 当前已完成：
 
@@ -38,10 +39,11 @@
 - 阶段 4：课堂状态机与签到系统
 - 阶段 5：课堂公告与 WebSocket 实时通信
 - 阶段 6：课堂互动问答 P0
+- 阶段 7：作业管理 P0
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 7：作业管理 P0
+- 阶段 8：AI 管理、降级与内容安全
 
 ## 技术栈
 
@@ -95,6 +97,7 @@ backend/
       backup.py        本地与可移动盘备份、恢复服务
       network.py       网卡候选地址、端口与防火墙引导
       questions.py     课堂问答、答题、自动判分和统计服务
+      homework.py      作业发布、提交、版本和提交统计服务
       startup.py       启动检查、目录初始化、U 盘路径识别、自动备份任务
     main.py            FastAPI 应用入口
   run.py               Uvicorn 启动入口，含端口备选逻辑
@@ -126,6 +129,7 @@ docs/
   phase-4-delivery.md  阶段 4 交付说明
   phase-5-delivery.md  阶段 5 交付说明
   phase-6-delivery.md  阶段 6 交付说明
+  phase-7-delivery.md  阶段 7 交付说明
 ```
 
 ## 后端运行
@@ -243,23 +247,19 @@ npm 如遇下载慢，可考虑设置国内 registry，但不要无故改动锁�
 
 下一阶段建议优先实现：
 
-1. 教师首次设置密码。
-2. 教师登录与接口鉴权。
-3. 网卡枚举与候选 IP 选择。
-4. 端口冲突检测与访问地址生成。
-5. 防火墙引导说明。
-6. 本地与 U 盘备份目录初始化。
-7. 手动备份、自动备份、保留最近 5 份备份。
+1. AI provider 配置模型和接口，支持 base_url、模型名、API Key、代理和启用状态。
+2. 启动时或教师手动触发 AI 连通性自检。
+3. AI 不可用时展示基础模式提示，不影响签到、答题、作业提交和统计。
+4. 建立 AI 调用失败处理入口，为后续简答反馈、作业批阅和学习评估降级到人工处理。
+5. 建立 AI 返回内容安全检查，支持长度截断、关键词过滤和展示策略配置。
 
-阶段 2 对应需求重点：
+阶段 8 对应需求重点：
 
-- SYS-AUTH-01
-- SYS-AUTH-02
-- SYS-NET-01
-- SYS-NET-02
-- SYS-NET-03
-- SYS-DEP-01
-- SYS-DEP-02
+- SYS-AI-01
+- SYS-AI-02
+- SYS-AI-03
+- SYS-AI-04
+- SYS-AI-06
 
 ## 开发约定
 
@@ -339,7 +339,8 @@ POST /api/v1/academic/imports/{job_id}/confirm
 
 ## 注意事项
 
-- 当前环境可能没有 `git` 命令，不要假设可以使用 `git status` 或 `git diff`。
+- 当前环境可用 Git：`C:\Program Files\Git\cmd\git.exe`。
+- 按用户要求：每完成一个阶段提交一次，但不要 push。
 - PowerShell 默认编码有时会导致中文输出乱码，读取中文 Markdown 时使用 `Get-Content -Encoding utf8`。
 - 如果启动前端时根路径短暂返回异常，优先用 `curl.exe http://127.0.0.1:5173/` 或浏览器验证；此前 Vite 日志显示服务正常。
 - 后端配置中的 `app_name` 中文在某些 PowerShell JSON 输出里可能显示为乱码，但 HTTP 实际响应和前端显示正常。
@@ -376,3 +377,15 @@ WS   /ws/classroom/{session_id}
 ```
 
 阶段 6 已完成课堂问答 P0：教师发布单选、多选、判断、填空、简答题；学生在线作答；客观题和填空题自动判分；教师查看提交数、正确率、选项分布和典型答案。下一阶段按实施方案进入“阶段 7：作业管理 P0”。
+
+## 阶段 7 接口索引
+
+```text
+POST /api/v1/homework/sessions/{session_id}
+GET  /api/v1/homework/sessions/{session_id}
+GET  /api/v1/homework/sessions/{session_id}/public
+POST /api/v1/homework/{homework_id}/submissions
+GET  /api/v1/homework/{homework_id}/submissions
+```
+
+阶段 7 已完成作业管理 P0：教师发布作业，学生提交文本和附件，多次提交版本完整保留，截止控制和迟交标记可用，教师查看作业提交列表。下一阶段按实施方案进入“阶段 8：AI 管理、降级与内容安全”。

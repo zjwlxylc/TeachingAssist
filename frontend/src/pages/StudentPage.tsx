@@ -20,6 +20,8 @@ import FormControlLabel from "@mui/material/FormControlLabel";
 import LoginIcon from "@mui/icons-material/Login";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
+import AssignmentIcon from "@mui/icons-material/Assignment";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 
 import { ClassroomSession } from "../api/academic";
 import {
@@ -35,6 +37,12 @@ import {
   fetchPublicQuestions,
   submitQuestionAnswer
 } from "../api/questions";
+import {
+  Homework,
+  HomeworkSubmitResult,
+  fetchPublicHomework,
+  submitHomework
+} from "../api/homework";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 
@@ -60,6 +68,10 @@ export function StudentPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<number, boolean>>({});
+  const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
+  const [homeworkText, setHomeworkText] = useState<Record<number, string>>({});
+  const [homeworkFiles, setHomeworkFiles] = useState<Record<number, File[]>>({});
+  const [submittedHomework, setSubmittedHomework] = useState<Record<number, HomeworkSubmitResult>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
@@ -74,6 +86,7 @@ export function StudentPage() {
     socketRef.current = null;
     setAnnouncements([]);
     setQuestions([]);
+    setHomeworkList([]);
     setSubmittedQuestions({});
     lastAnnouncementIdRef.current = 0;
     if (!currentSession?.id) {
@@ -94,12 +107,17 @@ export function StudentPage() {
     };
     const loadMessages = async (lastId?: number) => {
       try {
-        const [items, questionItems] = await Promise.all([fetchAnnouncements(sessionId, lastId), fetchPublicQuestions(sessionId)]);
+        const [items, questionItems, homeworkItems] = await Promise.all([
+          fetchAnnouncements(sessionId, lastId),
+          fetchPublicQuestions(sessionId),
+          fetchPublicHomework(sessionId)
+        ]);
         if (!disposed) {
           mergeAnnouncements(items);
           if (questionItems.length) {
             setQuestions(questionItems);
           }
+          setHomeworkList(homeworkItems);
         }
       } catch (err) {
         if (!disposed) {
@@ -210,6 +228,32 @@ export function StudentPage() {
     } catch (err) {
       setError((err as Error).message);
     }
+  }
+
+  async function handleSubmitHomework(homework: Homework) {
+    if (!studentId || !name) {
+      setError("请先填写学号和姓名");
+      return;
+    }
+    try {
+      const result = await submitHomework(homework.id, {
+        student_id: studentId,
+        name,
+        text_content: homeworkText[homework.id] ?? "",
+        files: homeworkFiles[homework.id] ?? []
+      });
+      setSubmittedHomework((current) => ({ ...current, [homework.id]: result }));
+      setMessage(`作业已提交，当前版本 ${result.submit_version}`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function updateHomeworkFiles(homeworkId: number, fileList: FileList | null) {
+    setHomeworkFiles((current) => ({
+      ...current,
+      [homeworkId]: fileList ? Array.from(fileList) : []
+    }));
   }
 
   function renderAnswerInput(question: Question) {
@@ -386,6 +430,80 @@ export function StudentPage() {
               </Paper>
             ))}
             {questions.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的问题。</Typography>}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Card sx={{ maxWidth: 760 }}>
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <AssignmentIcon color="primary" />
+              <Typography variant="h2">课堂作业</Typography>
+            </Stack>
+            {homeworkList.map((homework) => {
+              const submitted = submittedHomework[homework.id];
+              const selectedFiles = homeworkFiles[homework.id] ?? [];
+              return (
+                <Paper key={homework.id} variant="outlined" sx={{ p: 2 }}>
+                  <Stack spacing={1.5}>
+                    <Box>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography fontWeight={700}>{homework.title}</Typography>
+                        <Chip size="small" label={homework.status} />
+                        {submitted && (
+                          <Chip
+                            size="small"
+                            color={submitted.status === "late" ? "warning" : "success"}
+                            label={`已提交 v${submitted.submit_version}`}
+                          />
+                        )}
+                      </Stack>
+                      <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
+                        截止时间：{homework.deadline}
+                        {homework.allow_late ? "，允许迟交" : ""}
+                      </Typography>
+                      {homework.description && <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{homework.description}</Typography>}
+                      {homework.grading_criteria && (
+                        <Typography color="text.secondary" variant="body2" sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>
+                          评分标准：{homework.grading_criteria}
+                        </Typography>
+                      )}
+                    </Box>
+                    <TextField
+                      label="提交内容"
+                      value={homeworkText[homework.id] ?? ""}
+                      onChange={(event) =>
+                        setHomeworkText((current) => ({ ...current, [homework.id]: event.target.value }))
+                      }
+                      multiline
+                      minRows={3}
+                      fullWidth
+                    />
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ xs: "stretch", sm: "center" }}>
+                      <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>
+                        选择附件
+                        <input
+                          type="file"
+                          multiple
+                          hidden
+                          onChange={(event) => updateHomeworkFiles(homework.id, event.target.files)}
+                        />
+                      </Button>
+                      <Typography color="text.secondary" variant="body2">
+                        {selectedFiles.length > 0
+                          ? selectedFiles.map((file) => file.name).join("，")
+                          : "支持 doc、pdf、zip、txt、图片等常见格式"}
+                      </Typography>
+                    </Stack>
+                    <Button variant="contained" startIcon={<SendIcon />} onClick={() => handleSubmitHomework(homework)}>
+                      {submitted ? "再次提交" : "提交作业"}
+                    </Button>
+                  </Stack>
+                </Paper>
+              );
+            })}
+            {homeworkList.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的作业。</Typography>}
           </Stack>
         </CardContent>
       </Card>

@@ -40,6 +40,7 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import FactCheckIcon from "@mui/icons-material/FactCheck";
 import QuizIcon from "@mui/icons-material/Quiz";
 import SendIcon from "@mui/icons-material/Send";
+import AssignmentIcon from "@mui/icons-material/Assignment";
 
 import {
   ClassGroup,
@@ -93,6 +94,13 @@ import {
   fetchQuestions,
   publishQuestion
 } from "../api/questions";
+import {
+  Homework,
+  HomeworkSubmissionSummary,
+  createHomework,
+  fetchHomework,
+  fetchHomeworkSubmissionSummary
+} from "../api/homework";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
 
@@ -149,6 +157,14 @@ export function TeacherPage() {
   const [questionScore, setQuestionScore] = useState<number | "">(1);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [questionStats, setQuestionStats] = useState<QuestionStats | null>(null);
+  const [homeworkSessionId, setHomeworkSessionId] = useState<number | "">("");
+  const [homeworkTitle, setHomeworkTitle] = useState("");
+  const [homeworkDescription, setHomeworkDescription] = useState("");
+  const [homeworkDeadline, setHomeworkDeadline] = useState("");
+  const [homeworkCriteria, setHomeworkCriteria] = useState("");
+  const [homeworkAllowLate, setHomeworkAllowLate] = useState(false);
+  const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
+  const [homeworkSummary, setHomeworkSummary] = useState<HomeworkSubmissionSummary | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedIp, setSelectedIp] = useState("");
@@ -491,6 +507,50 @@ export function TeacherPage() {
     try {
       setQuestionStats(await fetchQuestionStats(questionId));
       setMessage("问答统计已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadHomework(sessionId: number) {
+    try {
+      setHomeworkSessionId(sessionId);
+      setHomeworkList(await fetchHomework(sessionId));
+      setHomeworkSummary(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleCreateHomework() {
+    if (!homeworkSessionId || !homeworkTitle || !homeworkDeadline) {
+      setError("请先选择课堂，并填写作业标题和截止时间");
+      return;
+    }
+    try {
+      await createHomework(Number(homeworkSessionId), {
+        title: homeworkTitle,
+        description: homeworkDescription || undefined,
+        deadline: homeworkDeadline,
+        grading_criteria: homeworkCriteria || undefined,
+        allow_late: homeworkAllowLate
+      });
+      setHomeworkTitle("");
+      setHomeworkDescription("");
+      setHomeworkDeadline("");
+      setHomeworkCriteria("");
+      setHomeworkAllowLate(false);
+      setHomeworkList(await fetchHomework(Number(homeworkSessionId)));
+      setMessage("作业已发布");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadHomeworkSummary(homeworkId: number) {
+    try {
+      setHomeworkSummary(await fetchHomeworkSubmissionSummary(homeworkId));
+      setMessage("作业提交列表已刷新");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1289,6 +1349,168 @@ export function TeacherPage() {
                         </Stack>
                       ) : (
                         <Typography color="text.secondary">点击问题右侧统计查看提交、正确率和答案分布。</Typography>
+                      )}
+                    </Paper>
+                  </Stack>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <AssignmentIcon color="primary" />
+                  <Typography variant="h2">课堂作业</Typography>
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  发布课堂作业，学生可提交文本和附件，教师可查看提交状态与最新版本。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={5}>
+                  <Stack spacing={1.5}>
+                    <FormControl fullWidth>
+                      <InputLabel id="homework-session-label">作业课堂</InputLabel>
+                      <Select
+                        labelId="homework-session-label"
+                        label="作业课堂"
+                        value={homeworkSessionId}
+                        onChange={(event) => handleLoadHomework(Number(event.target.value))}
+                      >
+                        {sessions.map((session) => (
+                          <MenuItem key={session.id} value={session.id}>
+                            #{session.id} {session.course_name} / {session.title} / {session.status}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <TextField
+                      label="作业标题"
+                      value={homeworkTitle}
+                      onChange={(event) => setHomeworkTitle(event.target.value)}
+                      fullWidth
+                    />
+                    <TextField
+                      label="作业说明"
+                      value={homeworkDescription}
+                      onChange={(event) => setHomeworkDescription(event.target.value)}
+                      multiline
+                      minRows={3}
+                      fullWidth
+                    />
+                    <TextField
+                      label="截止时间"
+                      type="datetime-local"
+                      value={homeworkDeadline}
+                      onChange={(event) => setHomeworkDeadline(event.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      fullWidth
+                    />
+                    <TextField
+                      label="评分标准"
+                      value={homeworkCriteria}
+                      onChange={(event) => setHomeworkCriteria(event.target.value)}
+                      multiline
+                      minRows={2}
+                      fullWidth
+                    />
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={homeworkAllowLate}
+                          onChange={(event) => setHomeworkAllowLate(event.target.checked)}
+                        />
+                      }
+                      label="允许截止后迟交"
+                    />
+                    <Button variant="contained" startIcon={<AssignmentIcon />} onClick={handleCreateHomework}>
+                      发布作业
+                    </Button>
+                  </Stack>
+                </Grid>
+
+                <Grid item xs={12} md={7}>
+                  <Stack spacing={1.5}>
+                    <Paper variant="outlined" sx={{ p: 2, minHeight: 220 }}>
+                      <Stack spacing={1.5}>
+                        {homeworkList.map((item) => (
+                          <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                            <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={1}>
+                              <Box>
+                                <Typography fontWeight={700}>{item.title}</Typography>
+                                <Typography color="text.secondary" variant="body2">
+                                  {item.status} / 截止 {item.deadline}
+                                  {item.allow_late ? " / 允许迟交" : ""}
+                                </Typography>
+                              </Box>
+                              <Button size="small" variant="outlined" onClick={() => handleLoadHomeworkSummary(item.id)}>
+                                提交列表
+                              </Button>
+                            </Stack>
+                          </Box>
+                        ))}
+                        {homeworkList.length === 0 && (
+                          <Typography color="text.secondary">选择课堂后可查看已发布作业。</Typography>
+                        )}
+                      </Stack>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2, minHeight: 260, overflow: "auto" }}>
+                      {homeworkSummary ? (
+                        <Stack spacing={1.5}>
+                          <Box>
+                            <Typography fontWeight={700}>{homeworkSummary.homework.title}</Typography>
+                            <Typography color="text.secondary">
+                              应交 {homeworkSummary.stats.total} 人，已交 {homeworkSummary.stats.submitted}，未交{" "}
+                              {homeworkSummary.stats.not_submitted}，迟交 {homeworkSummary.stats.late}
+                            </Typography>
+                          </Box>
+                          <Table size="small" stickyHeader>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>学号</TableCell>
+                                <TableCell>姓名</TableCell>
+                                <TableCell>状态</TableCell>
+                                <TableCell>版本</TableCell>
+                                <TableCell>提交时间</TableCell>
+                                <TableCell>内容/附件</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {homeworkSummary.records.map((record) => (
+                                <TableRow key={record.student_pk}>
+                                  <TableCell>{record.student_number}</TableCell>
+                                  <TableCell>{record.student_name}</TableCell>
+                                  <TableCell>{record.submission_status}</TableCell>
+                                  <TableCell>{record.submit_version ?? "-"}</TableCell>
+                                  <TableCell>{record.submitted_at ?? "-"}</TableCell>
+                                  <TableCell sx={{ minWidth: 220 }}>
+                                    <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+                                      {record.text_content || "-"}
+                                    </Typography>
+                                    {record.files.length > 0 && (
+                                      <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                                        {record.files.map((file) => (
+                                          <Typography key={`${record.submission_id}-${file.original_name}`} variant="body2" color="text.secondary">
+                                            {file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
+                                          </Typography>
+                                        ))}
+                                      </Stack>
+                                    )}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </Stack>
+                      ) : (
+                        <Typography color="text.secondary">点击作业右侧提交列表查看学生提交状态。</Typography>
                       )}
                     </Paper>
                   </Stack>
