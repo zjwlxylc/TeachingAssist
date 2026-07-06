@@ -1,0 +1,102 @@
+import { request } from "./http";
+
+export type QuestionType = "single_choice" | "multiple_choice" | "true_false" | "fill_blank" | "short_answer";
+
+export interface QuestionOption {
+  id?: number;
+  option_key: string;
+  content: string;
+  is_correct?: number | boolean;
+  display_order?: number;
+}
+
+export interface Question {
+  id: number;
+  session_id: number;
+  title: string;
+  content: string;
+  question_type: QuestionType;
+  status: string;
+  start_time: string | null;
+  deadline: string | null;
+  score: number;
+  created_at: string;
+  published_at: string | null;
+  updated_at: string;
+  correct_answer?: string[] | string | null;
+  keywords?: string[];
+  options: QuestionOption[];
+}
+
+export interface QuestionStats {
+  question: Question;
+  total_students: number;
+  submitted_count: number;
+  draft_count: number;
+  correct_count: number;
+  correct_rate: number;
+  option_distribution: Record<string, number>;
+  typical_answers: Array<{ answer: string; count: number }>;
+  answers: Array<Record<string, unknown>>;
+}
+
+export interface QuestionPublishedMessage {
+  type: "question.published";
+  session_id: number;
+  question: Question;
+}
+
+export interface QuestionAnswerUpdatedMessage {
+  type: "question.answer.updated";
+  session_id: number;
+  question_id: number;
+  student_id: string;
+  status: string;
+}
+
+export function fetchQuestions(sessionId: number) {
+  return request<Question[]>(`/questions/sessions/${sessionId}`);
+}
+
+export function fetchPublicQuestions(sessionId: number) {
+  return request<Question[]>(`/questions/sessions/${sessionId}/public`);
+}
+
+export function publishQuestion(
+  sessionId: number,
+  payload: {
+    title: string;
+    content: string;
+    question_type: QuestionType;
+    options?: QuestionOption[];
+    correct_answer?: unknown;
+    keywords?: string[];
+    score?: number;
+    start_time?: string;
+    deadline?: string;
+  }
+) {
+  return request<Question>(`/questions/sessions/${sessionId}`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function submitQuestionAnswer(
+  questionId: number,
+  payload: {
+    student_id: string;
+    name: string;
+    answer: unknown;
+    action?: "start_answer" | "save_draft" | "submit_answer" | "timeout_submit" | "view_feedback";
+  }
+) {
+  return request<Record<string, unknown>>(`/questions/${questionId}/answers`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function fetchQuestionStats(questionId: number) {
+  return request<QuestionStats>(`/questions/${questionId}/stats`);
+}

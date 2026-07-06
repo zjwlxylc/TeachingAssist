@@ -28,6 +28,7 @@
 - `docs/phase-3-delivery.md`
 - `docs/phase-4-delivery.md`
 - `docs/phase-5-delivery.md`
+- `docs/phase-6-delivery.md`
 
 当前已完成：
 
@@ -36,10 +37,11 @@
 - 阶段 3：课程、班级、课堂与学生导入
 - 阶段 4：课堂状态机与签到系统
 - 阶段 5：课堂公告与 WebSocket 实时通信
+- 阶段 6：课堂互动问答 P0
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 6：课堂互动问答 P0
+- 阶段 7：作业管理 P0
 
 ## 技术栈
 
@@ -92,6 +94,7 @@ backend/
       academic.py      课程、班级、课堂与学生导入服务
       backup.py        本地与可移动盘备份、恢复服务
       network.py       网卡候选地址、端口与防火墙引导
+      questions.py     课堂问答、答题、自动判分和统计服务
       startup.py       启动检查、目录初始化、U 盘路径识别、自动备份任务
     main.py            FastAPI 应用入口
   run.py               Uvicorn 启动入口，含端口备选逻辑
@@ -122,6 +125,7 @@ docs/
   phase-3-delivery.md  阶段 3 交付说明
   phase-4-delivery.md  阶段 4 交付说明
   phase-5-delivery.md  阶段 5 交付说明
+  phase-6-delivery.md  阶段 6 交付说明
 ```
 
 ## 后端运行
@@ -359,3 +363,16 @@ GET  /api/v1/announcements/sessions/{session_id}?last_message_id={id}
 POST /api/v1/announcements/sessions/{session_id}
 WS   /ws/classroom/{session_id}
 ```
+
+## 阶段 6 接口索引
+
+```text
+POST /api/v1/questions/sessions/{session_id}
+GET  /api/v1/questions/sessions/{session_id}
+GET  /api/v1/questions/sessions/{session_id}/public
+POST /api/v1/questions/{question_id}/answers
+GET  /api/v1/questions/{question_id}/stats
+WS   /ws/classroom/{session_id}
+```
+
+阶段 6 已完成课堂问答 P0：教师发布单选、多选、判断、填空、简答题；学生在线作答；客观题和填空题自动判分；教师查看提交数、正确率、选项分布和典型答案。下一阶段按实施方案进入“阶段 7：作业管理 P0”。

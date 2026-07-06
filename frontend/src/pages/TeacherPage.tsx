@@ -38,6 +38,8 @@ import EventIcon from "@mui/icons-material/Event";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import FactCheckIcon from "@mui/icons-material/FactCheck";
+import QuizIcon from "@mui/icons-material/Quiz";
+import SendIcon from "@mui/icons-material/Send";
 
 import {
   ClassGroup,
@@ -82,8 +84,32 @@ import {
   fetchSignInSummary,
   startClassroomSession
 } from "../api/classroom";
+import {
+  Question,
+  QuestionOption,
+  QuestionStats,
+  QuestionType,
+  fetchQuestionStats,
+  fetchQuestions,
+  publishQuestion
+} from "../api/questions";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
+
+const QUESTION_TYPE_LABELS: Record<QuestionType, string> = {
+  single_choice: "单选题",
+  multiple_choice: "多选题",
+  true_false: "判断题",
+  fill_blank: "填空题",
+  short_answer: "简答题"
+};
+
+const DEFAULT_OPTIONS: QuestionOption[] = [
+  { option_key: "A", content: "", is_correct: false },
+  { option_key: "B", content: "", is_correct: false },
+  { option_key: "C", content: "", is_correct: false },
+  { option_key: "D", content: "", is_correct: false }
+];
 
 export function TeacherPage() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -112,6 +138,17 @@ export function TeacherPage() {
   const [announcementSessionId, setAnnouncementSessionId] = useState<number | "">("");
   const [announcementContent, setAnnouncementContent] = useState("");
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [questionSessionId, setQuestionSessionId] = useState<number | "">("");
+  const [questionTitle, setQuestionTitle] = useState("");
+  const [questionContent, setQuestionContent] = useState("");
+  const [questionType, setQuestionType] = useState<QuestionType>("single_choice");
+  const [questionOptions, setQuestionOptions] = useState<QuestionOption[]>(DEFAULT_OPTIONS);
+  const [questionAnswer, setQuestionAnswer] = useState("");
+  const [questionKeywords, setQuestionKeywords] = useState("");
+  const [questionDeadline, setQuestionDeadline] = useState("");
+  const [questionScore, setQuestionScore] = useState<number | "">(1);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [questionStats, setQuestionStats] = useState<QuestionStats | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedIp, setSelectedIp] = useState("");
@@ -367,6 +404,93 @@ export function TeacherPage() {
       setAnnouncementContent("");
       setAnnouncements(await fetchAnnouncements(Number(announcementSessionId)));
       setMessage("公告已发布");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadQuestions(sessionId: number) {
+    try {
+      setQuestionSessionId(sessionId);
+      setQuestions(await fetchQuestions(sessionId));
+      setQuestionStats(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function updateQuestionOption(index: number, patch: Partial<QuestionOption>) {
+    setQuestionOptions((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+  }
+
+  function normalizedQuestionPayload() {
+    const base = {
+      title: questionTitle,
+      content: questionContent,
+      question_type: questionType,
+      score: questionScore === "" ? 1 : Number(questionScore),
+      deadline: questionDeadline || undefined
+    };
+    if (questionType === "fill_blank") {
+      return {
+        ...base,
+        correct_answer: questionAnswer
+          .split(/[,，;；\n]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+        keywords: questionKeywords
+          .split(/[,，;；\n]/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      };
+    }
+    if (questionType === "short_answer") {
+      return { ...base, correct_answer: questionAnswer };
+    }
+    if (questionType === "true_false") {
+      return {
+        ...base,
+        options: [
+          { option_key: "T", content: "正确", is_correct: questionAnswer === "T" },
+          { option_key: "F", content: "错误", is_correct: questionAnswer === "F" }
+        ],
+        correct_answer: questionAnswer ? [questionAnswer] : []
+      };
+    }
+    const options = questionOptions
+      .filter((option) => option.content.trim())
+      .map((option, index) => ({ ...option, display_order: index }));
+    return {
+      ...base,
+      options,
+      correct_answer: options.filter((option) => option.is_correct).map((option) => option.option_key)
+    };
+  }
+
+  async function handlePublishQuestion() {
+    if (!questionSessionId) {
+      setError("请先选择课堂");
+      return;
+    }
+    try {
+      await publishQuestion(Number(questionSessionId), normalizedQuestionPayload());
+      setQuestionTitle("");
+      setQuestionContent("");
+      setQuestionAnswer("");
+      setQuestionKeywords("");
+      setQuestionDeadline("");
+      setQuestionOptions(DEFAULT_OPTIONS);
+      setQuestions(await fetchQuestions(Number(questionSessionId)));
+      setMessage("问题已发布");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadQuestionStats(questionId: number) {
+    try {
+      setQuestionStats(await fetchQuestionStats(questionId));
+      setMessage("问答统计已刷新");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -934,6 +1058,245 @@ export function TeacherPage() {
             </Card>
           </Grid>
         </Grid>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <QuizIcon color="primary" />
+                  <Typography variant="h2">课堂问答</Typography>
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  发布课堂题目，学生在线作答后可查看提交和正确率统计。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={5}>
+                  <Stack spacing={1.5}>
+                    <FormControl fullWidth>
+                      <InputLabel id="question-session-label">问答课堂</InputLabel>
+                      <Select
+                        labelId="question-session-label"
+                        label="问答课堂"
+                        value={questionSessionId}
+                        onChange={(event) => handleLoadQuestions(Number(event.target.value))}
+                      >
+                        {sessions.map((session) => (
+                          <MenuItem key={session.id} value={session.id}>
+                            #{session.id} {session.course_name} / {session.title} / {session.status}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                      <FormControl fullWidth>
+                        <InputLabel id="question-type-label">题型</InputLabel>
+                        <Select
+                          labelId="question-type-label"
+                          label="题型"
+                          value={questionType}
+                          onChange={(event) => {
+                            const nextType = event.target.value as QuestionType;
+                            setQuestionType(nextType);
+                            setQuestionAnswer("");
+                            setQuestionOptions(nextType === "true_false" ? [] : DEFAULT_OPTIONS);
+                          }}
+                        >
+                          {Object.entries(QUESTION_TYPE_LABELS).map(([value, label]) => (
+                            <MenuItem key={value} value={value}>
+                              {label}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <TextField
+                        label="分值"
+                        type="number"
+                        value={questionScore}
+                        onChange={(event) => setQuestionScore(event.target.value === "" ? "" : Number(event.target.value))}
+                        fullWidth
+                      />
+                    </Stack>
+                    <TextField
+                      label="题目标题"
+                      value={questionTitle}
+                      onChange={(event) => setQuestionTitle(event.target.value)}
+                      fullWidth
+                    />
+                    <TextField
+                      label="题干"
+                      value={questionContent}
+                      onChange={(event) => setQuestionContent(event.target.value)}
+                      multiline
+                      minRows={3}
+                      fullWidth
+                    />
+                    <TextField
+                      label="截止时间"
+                      type="datetime-local"
+                      value={questionDeadline}
+                      onChange={(event) => setQuestionDeadline(event.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      fullWidth
+                    />
+
+                    {questionType === "true_false" && (
+                      <FormControl fullWidth>
+                        <InputLabel id="true-false-answer-label">正确答案</InputLabel>
+                        <Select
+                          labelId="true-false-answer-label"
+                          label="正确答案"
+                          value={questionAnswer}
+                          onChange={(event) => setQuestionAnswer(event.target.value)}
+                        >
+                          <MenuItem value="T">正确</MenuItem>
+                          <MenuItem value="F">错误</MenuItem>
+                        </Select>
+                      </FormControl>
+                    )}
+
+                    {(questionType === "single_choice" || questionType === "multiple_choice") && (
+                      <Stack spacing={1}>
+                        {questionOptions.map((option, index) => (
+                          <Stack key={option.option_key} direction="row" spacing={1} alignItems="center">
+                            <FormControlLabel
+                              control={
+                                <Checkbox
+                                  checked={Boolean(option.is_correct)}
+                                  onChange={(event) => {
+                                    if (questionType === "single_choice") {
+                                      setQuestionOptions((current) =>
+                                        current.map((item, itemIndex) => ({
+                                          ...item,
+                                          is_correct: itemIndex === index ? event.target.checked : false
+                                        }))
+                                      );
+                                    } else {
+                                      updateQuestionOption(index, { is_correct: event.target.checked });
+                                    }
+                                  }}
+                                />
+                              }
+                              label={option.option_key}
+                              sx={{ minWidth: 72 }}
+                            />
+                            <TextField
+                              label="选项内容"
+                              value={option.content}
+                              onChange={(event) => updateQuestionOption(index, { content: event.target.value })}
+                              fullWidth
+                            />
+                          </Stack>
+                        ))}
+                      </Stack>
+                    )}
+
+                    {questionType === "fill_blank" && (
+                      <>
+                        <TextField
+                          label="标准答案"
+                          value={questionAnswer}
+                          onChange={(event) => setQuestionAnswer(event.target.value)}
+                          helperText="多个答案可用逗号、分号或换行分隔"
+                          multiline
+                          minRows={2}
+                          fullWidth
+                        />
+                        <TextField
+                          label="关键词"
+                          value={questionKeywords}
+                          onChange={(event) => setQuestionKeywords(event.target.value)}
+                          helperText="设置后答案需包含全部关键词"
+                          fullWidth
+                        />
+                      </>
+                    )}
+
+                    {questionType === "short_answer" && (
+                      <TextField
+                        label="参考答案"
+                        value={questionAnswer}
+                        onChange={(event) => setQuestionAnswer(event.target.value)}
+                        multiline
+                        minRows={2}
+                        fullWidth
+                      />
+                    )}
+
+                    <Button variant="contained" startIcon={<SendIcon />} onClick={handlePublishQuestion}>
+                      发布问题
+                    </Button>
+                  </Stack>
+                </Grid>
+
+                <Grid item xs={12} md={7}>
+                  <Stack spacing={1.5}>
+                    <Paper variant="outlined" sx={{ p: 2, minHeight: 220 }}>
+                      <Stack spacing={1.5}>
+                        {questions.map((item) => (
+                          <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                            <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={1}>
+                              <Box>
+                                <Typography fontWeight={700}>{item.title}</Typography>
+                                <Typography color="text.secondary" variant="body2">
+                                  {QUESTION_TYPE_LABELS[item.question_type]} / {item.status}
+                                  {item.deadline ? ` / 截止 ${item.deadline}` : ""}
+                                </Typography>
+                              </Box>
+                              <Button size="small" variant="outlined" onClick={() => handleLoadQuestionStats(item.id)}>
+                                统计
+                              </Button>
+                            </Stack>
+                          </Box>
+                        ))}
+                        {questions.length === 0 && (
+                          <Typography color="text.secondary">选择课堂后可查看已发布问题。</Typography>
+                        )}
+                      </Stack>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2, minHeight: 220 }}>
+                      {questionStats ? (
+                        <Stack spacing={1.5}>
+                          <Box>
+                            <Typography fontWeight={700}>{questionStats.question.title}</Typography>
+                            <Typography color="text.secondary">
+                              应答 {questionStats.total_students} 人，已交 {questionStats.submitted_count}，正确{" "}
+                              {questionStats.correct_count}，正确率 {questionStats.correct_rate}%
+                            </Typography>
+                          </Box>
+                          {Object.keys(questionStats.option_distribution).length > 0 && (
+                            <Stack spacing={0.5}>
+                              {Object.entries(questionStats.option_distribution).map(([key, count]) => (
+                                <Typography key={key}>
+                                  选项 {key}：{count} 人
+                                </Typography>
+                              ))}
+                            </Stack>
+                          )}
+                          {questionStats.typical_answers.length > 0 && (
+                            <Stack spacing={0.5}>
+                              {questionStats.typical_answers.map((item) => (
+                                <Typography key={item.answer}>
+                                  {item.answer}：{item.count} 次
+                                </Typography>
+                              ))}
+                            </Stack>
+                          )}
+                        </Stack>
+                      ) : (
+                        <Typography color="text.secondary">点击问题右侧统计查看提交、正确率和答案分布。</Typography>
+                      )}
+                    </Paper>
+                  </Stack>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
       )}
 
       {isAuthenticated && (
