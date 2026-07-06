@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -18,7 +18,14 @@ import LoginIcon from "@mui/icons-material/Login";
 import RefreshIcon from "@mui/icons-material/Refresh";
 
 import { ClassroomSession } from "../api/academic";
+import {
+  Announcement,
+  AnnouncementMessage,
+  classroomSocketUrl,
+  fetchAnnouncements
+} from "../api/announcements";
 import { fetchActiveSessions, fetchPublicSession, studentSignIn, StudentSignInResult } from "../api/classroom";
+import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 
 export function StudentPage() {
@@ -29,12 +36,75 @@ export function StudentPage() {
   const [studentId, setStudentId] = useState("");
   const [name, setName] = useState("");
   const [result, setResult] = useState<StudentSignInResult | null>(null);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const socketRef = useRef<TeachingAssistSocket | null>(null);
+  const lastAnnouncementIdRef = useRef(0);
 
   useEffect(() => {
     loadActiveSessions();
   }, []);
+
+  useEffect(() => {
+    socketRef.current?.close();
+    socketRef.current = null;
+    setAnnouncements([]);
+    lastAnnouncementIdRef.current = 0;
+    if (!currentSession?.id) {
+      return undefined;
+    }
+
+    let disposed = false;
+    const sessionId = currentSession.id;
+    const mergeAnnouncements = (items: Announcement[]) => {
+      items.forEach((item) => {
+        lastAnnouncementIdRef.current = Math.max(lastAnnouncementIdRef.current, item.id);
+      });
+      setAnnouncements((current) => {
+        const next = new Map<number, Announcement>();
+        [...items, ...current].forEach((item) => next.set(item.id, item));
+        return Array.from(next.values()).sort((a, b) => b.id - a.id);
+      });
+    };
+    const loadMessages = async (lastId?: number) => {
+      try {
+        const items = await fetchAnnouncements(sessionId, lastId);
+        if (!disposed) {
+          mergeAnnouncements(items);
+        }
+      } catch (err) {
+        if (!disposed) {
+          setError((err as Error).message);
+        }
+      }
+    };
+
+    loadMessages();
+    const socket = new TeachingAssistSocket(
+      classroomSocketUrl(sessionId),
+      (event) => {
+        const payload = JSON.parse(event.data) as AnnouncementMessage;
+        if (payload.type === "announcement.created") {
+          mergeAnnouncements([payload.announcement]);
+          setMessage("收到新的课堂公告");
+        }
+      },
+      3000,
+      () => {
+        const lastId = lastAnnouncementIdRef.current;
+        if (lastId) {
+          loadMessages(lastId);
+        }
+      }
+    );
+    socketRef.current = socket;
+    socket.connect();
+    return () => {
+      disposed = true;
+      socket.close();
+    };
+  }, [currentSession?.id]);
 
   async function loadActiveSessions() {
     try {
@@ -141,6 +211,25 @@ export function StudentPage() {
                 {result.student_number} / {result.student_name} / {result.status}
                 {result.sign_time ? ` / ${result.sign_time}` : ""}
               </Alert>
+            )}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Card sx={{ maxWidth: 760 }}>
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Typography variant="h2">课堂公告</Typography>
+            {announcements.map((item) => (
+              <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                <Typography>{item.content}</Typography>
+                <Typography color="text.secondary" variant="body2">
+                  {item.sender_name} / {item.created_at}
+                </Typography>
+              </Box>
+            ))}
+            {announcements.length === 0 && (
+              <Typography color="text.secondary">进入课堂后可查看教师发布的公告。</Typography>
             )}
           </Stack>
         </CardContent>

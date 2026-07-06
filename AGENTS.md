@@ -27,6 +27,7 @@
 - `docs/phase-2-delivery.md`
 - `docs/phase-3-delivery.md`
 - `docs/phase-4-delivery.md`
+- `docs/phase-5-delivery.md`
 
 当前已完成：
 
@@ -34,10 +35,11 @@
 - 阶段 2：系统管理与部署基础
 - 阶段 3：课程、班级、课堂与学生导入
 - 阶段 4：课堂状态机与签到系统
+- 阶段 5：课堂公告与 WebSocket 实时通信
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 5：课堂公告、问答或实施方案中下一项课堂互动能力
+- 阶段 6：课堂互动问答 P0
 
 ## 技术栈
 
@@ -119,6 +121,7 @@ docs/
   phase-2-delivery.md  阶段 2 交付说明
   phase-3-delivery.md  阶段 3 交付说明
   phase-4-delivery.md  阶段 4 交付说明
+  phase-5-delivery.md  阶段 5 交付说明
 ```
 
 ## 后端运行
@@ -346,4 +349,13 @@ GET  /api/v1/classroom/sessions/{session_id}/sign-ins
 GET  /api/v1/classroom/sessions/active/list
 GET  /api/v1/classroom/sessions/{session_id}
 POST /api/v1/classroom/sessions/{session_id}/sign-in
+```
+
+## 阶段 5 接口索引
+
+```text
+GET  /api/v1/announcements/sessions/{session_id}
+GET  /api/v1/announcements/sessions/{session_id}?last_message_id={id}
+POST /api/v1/announcements/sessions/{session_id}
+WS   /ws/classroom/{session_id}
 ```

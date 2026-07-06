@@ -72,6 +72,11 @@ import {
   StartupStatus
 } from "../api/system";
 import {
+  Announcement,
+  fetchAnnouncements,
+  publishAnnouncement
+} from "../api/announcements";
+import {
   SignInSummary,
   endClassroomSession,
   fetchSignInSummary,
@@ -104,6 +109,9 @@ export function TeacherPage() {
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [signInSummary, setSignInSummary] = useState<SignInSummary | null>(null);
+  const [announcementSessionId, setAnnouncementSessionId] = useState<number | "">("");
+  const [announcementContent, setAnnouncementContent] = useState("");
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedIp, setSelectedIp] = useState("");
@@ -335,6 +343,30 @@ export function TeacherPage() {
     try {
       setSignInSummary(await fetchSignInSummary(sessionId));
       setMessage("签到统计已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadAnnouncements(sessionId: number) {
+    try {
+      setAnnouncementSessionId(sessionId);
+      setAnnouncements(await fetchAnnouncements(sessionId));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handlePublishAnnouncement() {
+    if (!announcementSessionId) {
+      setError("请先选择课堂");
+      return;
+    }
+    try {
+      await publishAnnouncement(Number(announcementSessionId), announcementContent);
+      setAnnouncementContent("");
+      setAnnouncements(await fetchAnnouncements(Number(announcementSessionId)));
+      setMessage("公告已发布");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -902,6 +934,72 @@ export function TeacherPage() {
             </Card>
           </Grid>
         </Grid>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2}>
+              <Box>
+                <Typography variant="h2">课堂公告</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  公告会先保存到本地数据库，再实时推送给当前课堂在线学生。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={5}>
+                  <Stack spacing={1.5}>
+                    <FormControl fullWidth>
+                      <InputLabel id="announcement-session-label">公告课堂</InputLabel>
+                      <Select
+                        labelId="announcement-session-label"
+                        label="公告课堂"
+                        value={announcementSessionId}
+                        onChange={(event) => handleLoadAnnouncements(Number(event.target.value))}
+                      >
+                        {sessions.map((session) => (
+                          <MenuItem key={session.id} value={session.id}>
+                            #{session.id} {session.course_name} / {session.title}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <TextField
+                      label="公告内容"
+                      value={announcementContent}
+                      onChange={(event) => setAnnouncementContent(event.target.value)}
+                      multiline
+                      minRows={4}
+                      helperText={`${announcementContent.length}/500`}
+                      inputProps={{ maxLength: 500 }}
+                      fullWidth
+                    />
+                    <Button variant="contained" onClick={handlePublishAnnouncement}>
+                      发布公告
+                    </Button>
+                  </Stack>
+                </Grid>
+                <Grid item xs={12} md={7}>
+                  <Paper variant="outlined" sx={{ p: 2, minHeight: 220 }}>
+                    <Stack spacing={1.5}>
+                      {announcements.map((item) => (
+                        <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                          <Typography>{item.content}</Typography>
+                          <Typography color="text.secondary" variant="body2">
+                            {item.sender_name} / {item.created_at}
+                          </Typography>
+                        </Box>
+                      ))}
+                      {announcements.length === 0 && (
+                        <Typography color="text.secondary">选择课堂后可查看历史公告。</Typography>
+                      )}
+                    </Stack>
+                  </Paper>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
       )}
 
       <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
