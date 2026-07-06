@@ -41,6 +41,7 @@ import FactCheckIcon from "@mui/icons-material/FactCheck";
 import QuizIcon from "@mui/icons-material/Quiz";
 import SendIcon from "@mui/icons-material/Send";
 import AssignmentIcon from "@mui/icons-material/Assignment";
+import PsychologyIcon from "@mui/icons-material/Psychology";
 
 import {
   ClassGroup,
@@ -101,6 +102,18 @@ import {
   fetchHomework,
   fetchHomeworkSubmissionSummary
 } from "../api/homework";
+import {
+  AiOverview,
+  AiProvider,
+  AiSafetyCheckResult,
+  activateAiProvider,
+  checkAiConnectivity,
+  checkAiSafety,
+  fetchAiFailureTasks,
+  fetchAiOverview,
+  updateAiProvider,
+  updateAiSafety
+} from "../api/ai";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
 
@@ -124,6 +137,7 @@ export function TeacherPage() {
   const [startup, setStartup] = useState<StartupStatus | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [accessInfo, setAccessInfo] = useState<AccessInfo | null>(null);
+  const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
   const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
   const [classes, setClasses] = useState<ClassGroup[]>([]);
@@ -165,6 +179,21 @@ export function TeacherPage() {
   const [homeworkAllowLate, setHomeworkAllowLate] = useState(false);
   const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
   const [homeworkSummary, setHomeworkSummary] = useState<HomeworkSubmissionSummary | null>(null);
+  const [aiProviderId, setAiProviderId] = useState<number | "">("");
+  const [aiProviderName, setAiProviderName] = useState("");
+  const [aiDisplayName, setAiDisplayName] = useState("");
+  const [aiBaseUrl, setAiBaseUrl] = useState("");
+  const [aiModelName, setAiModelName] = useState("");
+  const [aiApiKey, setAiApiKey] = useState("");
+  const [aiHttpProxy, setAiHttpProxy] = useState("");
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiSafetyMaxLength, setAiSafetyMaxLength] = useState<number | "">(2000);
+  const [aiSafetyKeywords, setAiSafetyKeywords] = useState("");
+  const [aiKeywordAction, setAiKeywordAction] = useState<"replace" | "block">("replace");
+  const [aiDisplayStrategy, setAiDisplayStrategy] = useState<"review_first" | "direct_with_report">("review_first");
+  const [aiSafetySample, setAiSafetySample] = useState("");
+  const [aiSafetyResult, setAiSafetyResult] = useState<AiSafetyCheckResult | null>(null);
+  const [aiFailureTaskCount, setAiFailureTaskCount] = useState(0);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [selectedIp, setSelectedIp] = useState("");
@@ -187,11 +216,22 @@ export function TeacherPage() {
     if (!isAuthenticated) {
       return;
     }
-    Promise.all([fetchAccessInfo(), fetchBackups(), fetchCourses(), fetchClasses(), fetchSessions(), fetchStudents()])
-      .then(([accessData, backupData, courseData, classData, sessionData, studentData]) => {
+    Promise.all([
+      fetchAccessInfo(),
+      fetchAiOverview(),
+      fetchAiFailureTasks(),
+      fetchBackups(),
+      fetchCourses(),
+      fetchClasses(),
+      fetchSessions(),
+      fetchStudents()
+    ])
+      .then(([accessData, aiData, aiTasks, backupData, courseData, classData, sessionData, studentData]) => {
         setAccessInfo(accessData);
         setSelectedIp(accessData.selected_ip);
         setSelectedPort(accessData.port);
+        applyAiOverview(aiData);
+        setAiFailureTaskCount(aiTasks.length);
         setBackups(backupData);
         setCourses(courseData);
         setClasses(classData);
@@ -244,6 +284,108 @@ export function TeacherPage() {
     setSelectedIp(data.selected_ip);
     setSelectedPort(data.port);
     setMessage("访问地址已更新");
+  }
+
+  function applyAiOverview(data: AiOverview) {
+    setAiOverview(data);
+    const provider = data.active_provider ?? data.providers[0];
+    if (provider) {
+      fillAiProviderForm(provider);
+    }
+    setAiSafetyMaxLength(data.safety.max_length);
+    setAiSafetyKeywords(data.safety.blocked_keywords.join("\n"));
+    setAiKeywordAction(data.safety.keyword_action);
+    setAiDisplayStrategy(data.safety.display_strategy);
+  }
+
+  function fillAiProviderForm(provider: AiProvider) {
+    setAiProviderId(provider.id);
+    setAiProviderName(provider.provider_name);
+    setAiDisplayName(provider.display_name);
+    setAiBaseUrl(provider.base_url);
+    setAiModelName(provider.model_name);
+    setAiApiKey("");
+    setAiHttpProxy(provider.http_proxy ?? "");
+    setAiEnabled(provider.enabled);
+  }
+
+  async function reloadAiOverview() {
+    const [overview, tasks] = await Promise.all([fetchAiOverview(), fetchAiFailureTasks()]);
+    applyAiOverview(overview);
+    setAiFailureTaskCount(tasks.length);
+  }
+
+  async function handleSaveAiProvider() {
+    if (!aiProviderId) {
+      setError("请选择要配置的 AI Provider");
+      return;
+    }
+    try {
+      await updateAiProvider(Number(aiProviderId), {
+        provider_name: aiProviderName,
+        display_name: aiDisplayName,
+        base_url: aiBaseUrl,
+        model_name: aiModelName,
+        api_key: aiApiKey || undefined,
+        http_proxy: aiHttpProxy || undefined,
+        enabled: aiEnabled
+      });
+      await reloadAiOverview();
+      setMessage("AI Provider 配置已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleActivateAiProvider() {
+    if (!aiProviderId) {
+      setError("请选择要切换的 AI Provider");
+      return;
+    }
+    try {
+      await activateAiProvider(Number(aiProviderId));
+      await reloadAiOverview();
+      setMessage("AI Provider 已切换");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleCheckAiConnectivity() {
+    try {
+      const result = await checkAiConnectivity(aiProviderId ? Number(aiProviderId) : undefined);
+      await reloadAiOverview();
+      setMessage(result.message);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSaveAiSafety() {
+    try {
+      await updateAiSafety({
+        max_length: aiSafetyMaxLength === "" ? 2000 : Number(aiSafetyMaxLength),
+        blocked_keywords: aiSafetyKeywords
+          .split(/[,，;；\n]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+        keyword_action: aiKeywordAction,
+        display_strategy: aiDisplayStrategy
+      });
+      await reloadAiOverview();
+      setMessage("AI 内容安全策略已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleCheckAiSafety() {
+    try {
+      setAiSafetyResult(await checkAiSafety(aiSafetySample));
+      setMessage("内容安全检查已完成");
+    } catch (err) {
+      setError((err as Error).message);
+    }
   }
 
   async function handleBackup() {
@@ -667,6 +809,213 @@ export function TeacherPage() {
               <Typography>U 盘路径识别：{startup.removable_root ?? "未配置"}</Typography>
               <Typography>本次迁移：{startup.migrations.length ? startup.migrations.join(", ") : "无"}</Typography>
               <Typography>初始化目录：{startup.directories.join("；")}</Typography>
+              {startup.ai && (
+                <Alert severity={startup.ai.status === "available" ? "success" : "info"}>
+                  AI 启动自检：{startup.ai.message ?? startup.ai.status}
+                </Alert>
+              )}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && aiOverview && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <PsychologyIcon color="primary" />
+                  <Typography variant="h2">AI 管理与安全</Typography>
+                  <Chip
+                    size="small"
+                    color={aiOverview.status === "available" ? "success" : "warning"}
+                    label={aiOverview.status === "available" ? "AI 可用" : "基础模式"}
+                  />
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  当前 Provider：{aiOverview.active_provider?.display_name ?? "未配置"}，待人工处理任务 {aiFailureTaskCount} 个。
+                </Typography>
+              </Box>
+
+              {aiOverview.basic_mode && (
+                <Alert severity="info">
+                  AI 不可用时签到、答题提交、作业提交和统计继续可用；受影响功能：{aiOverview.affected_features.join("、")}。
+                </Alert>
+              )}
+
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={5}>
+                  <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
+                    <Stack spacing={1.5}>
+                      <Typography fontWeight={700}>Provider 配置</Typography>
+                      <FormControl fullWidth>
+                        <InputLabel id="ai-provider-label">Provider</InputLabel>
+                        <Select
+                          labelId="ai-provider-label"
+                          label="Provider"
+                          value={aiProviderId}
+                          onChange={(event) => {
+                            const provider = aiOverview.providers.find((item) => item.id === Number(event.target.value));
+                            if (provider) {
+                              fillAiProviderForm(provider);
+                            }
+                          }}
+                        >
+                          {aiOverview.providers.map((provider) => (
+                            <MenuItem key={provider.id} value={provider.id}>
+                              {provider.display_name} / {provider.last_status}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <TextField label="Provider 标识" value={aiProviderName} onChange={(event) => setAiProviderName(event.target.value)} />
+                      <TextField label="显示名称" value={aiDisplayName} onChange={(event) => setAiDisplayName(event.target.value)} />
+                      <TextField label="Base URL" value={aiBaseUrl} onChange={(event) => setAiBaseUrl(event.target.value)} />
+                      <TextField label="模型名称" value={aiModelName} onChange={(event) => setAiModelName(event.target.value)} />
+                      <TextField
+                        label={aiOverview.providers.find((item) => item.id === aiProviderId)?.api_key_set ? "API Key（留空则保留原值）" : "API Key"}
+                        type="password"
+                        value={aiApiKey}
+                        onChange={(event) => setAiApiKey(event.target.value)}
+                      />
+                      <TextField label="HTTP Proxy" value={aiHttpProxy} onChange={(event) => setAiHttpProxy(event.target.value)} />
+                      <FormControlLabel
+                        control={<Checkbox checked={aiEnabled} onChange={(event) => setAiEnabled(event.target.checked)} />}
+                        label="启用此 Provider"
+                      />
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <Button variant="contained" onClick={handleSaveAiProvider}>
+                          保存配置
+                        </Button>
+                        <Button variant="outlined" onClick={handleActivateAiProvider}>
+                          切换
+                        </Button>
+                        <Button variant="outlined" onClick={handleCheckAiConnectivity}>
+                          自检
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  </Paper>
+                </Grid>
+
+                <Grid item xs={12} md={7}>
+                  <Stack spacing={2}>
+                    <Paper variant="outlined" sx={{ p: 2 }}>
+                      <Stack spacing={1.5}>
+                        <Typography fontWeight={700}>内容安全</Typography>
+                        <Grid container spacing={1.5}>
+                          <Grid item xs={12} sm={4}>
+                            <TextField
+                              label="最大长度"
+                              type="number"
+                              value={aiSafetyMaxLength}
+                              onChange={(event) => setAiSafetyMaxLength(Number(event.target.value))}
+                              fullWidth
+                            />
+                          </Grid>
+                          <Grid item xs={12} sm={4}>
+                            <FormControl fullWidth>
+                              <InputLabel id="ai-keyword-action-label">敏感词处理</InputLabel>
+                              <Select
+                                labelId="ai-keyword-action-label"
+                                label="敏感词处理"
+                                value={aiKeywordAction}
+                                onChange={(event) => setAiKeywordAction(event.target.value as "replace" | "block")}
+                              >
+                                <MenuItem value="replace">替换为 ***</MenuItem>
+                                <MenuItem value="block">拦截展示</MenuItem>
+                              </Select>
+                            </FormControl>
+                          </Grid>
+                          <Grid item xs={12} sm={4}>
+                            <FormControl fullWidth>
+                              <InputLabel id="ai-display-strategy-label">展示策略</InputLabel>
+                              <Select
+                                labelId="ai-display-strategy-label"
+                                label="展示策略"
+                                value={aiDisplayStrategy}
+                                onChange={(event) => setAiDisplayStrategy(event.target.value as "review_first" | "direct_with_report")}
+                              >
+                                <MenuItem value="review_first">教师审核后展示</MenuItem>
+                                <MenuItem value="direct_with_report">直接展示并可举报</MenuItem>
+                              </Select>
+                            </FormControl>
+                          </Grid>
+                        </Grid>
+                        <TextField
+                          label="敏感关键词"
+                          value={aiSafetyKeywords}
+                          onChange={(event) => setAiSafetyKeywords(event.target.value)}
+                          multiline
+                          minRows={2}
+                          fullWidth
+                        />
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <Button variant="contained" onClick={handleSaveAiSafety}>
+                            保存策略
+                          </Button>
+                          <TextField
+                            label="测试文本"
+                            value={aiSafetySample}
+                            onChange={(event) => setAiSafetySample(event.target.value)}
+                            size="small"
+                            fullWidth
+                          />
+                          <Button variant="outlined" onClick={handleCheckAiSafety}>
+                            检查
+                          </Button>
+                        </Stack>
+                        {aiSafetyResult && (
+                          <Alert severity={aiSafetyResult.blocked ? "warning" : "success"}>
+                            {aiSafetyResult.message}；动作 {aiSafetyResult.action}；命中{" "}
+                            {aiSafetyResult.matched_keywords.length ? aiSafetyResult.matched_keywords.join("、") : "无"}。
+                            {aiSafetyResult.text ? ` 结果：${aiSafetyResult.text}` : ""}
+                          </Alert>
+                        )}
+                      </Stack>
+                    </Paper>
+
+                    <Paper variant="outlined" sx={{ p: 2, overflow: "auto" }}>
+                      <Typography fontWeight={700} sx={{ mb: 1 }}>
+                        降级策略
+                      </Typography>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>场景</TableCell>
+                            <TableCell>正常模式</TableCell>
+                            <TableCell>降级模式</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {aiOverview.degradation_strategies.map((strategy) => (
+                            <TableRow key={strategy.scenario}>
+                              <TableCell>{strategy.scenario}</TableCell>
+                              <TableCell>{strategy.normal_mode}</TableCell>
+                              <TableCell>{strategy.degraded_mode}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </Paper>
+                  </Stack>
+                </Grid>
+              </Grid>
+
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Typography fontWeight={700} sx={{ mb: 1 }}>
+                  自检记录
+                </Typography>
+                <Stack spacing={0.75}>
+                  {aiOverview.recent_checks.map((item) => (
+                    <Typography key={item.id} color="text.secondary">
+                      {item.checked_at} / {item.provider_display_name ?? "Provider"} / {item.status} / {item.message}
+                    </Typography>
+                  ))}
+                  {aiOverview.recent_checks.length === 0 && <Typography color="text.secondary">暂无自检记录</Typography>}
+                </Stack>
+              </Paper>
             </Stack>
           </CardContent>
         </Card>

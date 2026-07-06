@@ -14,6 +14,11 @@ export interface StartupStatus {
   migrations: string[];
   integrity: string;
   removable_root: string | null;
+  ai?: {
+    status: string;
+    message?: string;
+    basic_mode?: boolean;
+  };
 }
 
 export interface NetworkCandidate {

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.core.config import AppSettings
 from app.db.migrations import integrity_check, run_migrations
+from app.services.ai import check_connectivity, get_ai_overview
 
 
 logger = logging.getLogger(__name__)
@@ -40,11 +41,30 @@ def run_startup_checks(settings: AppSettings) -> dict[str, object]:
     migrations = run_migrations()
     integrity = integrity_check()
     removable_root = detect_removable_root(settings)
+    ai_status: dict[str, object]
 
     if integrity.lower() != "ok":
         logger.error("SQLite integrity check failed: %s", integrity)
     else:
         logger.info("SQLite integrity check passed")
+
+    try:
+        overview = get_ai_overview()
+        if overview.get("active_provider"):
+            ai_status = check_connectivity()
+        else:
+            ai_status = {
+                "status": "disabled",
+                "message": "未配置 AI Provider，系统进入基础模式",
+                "basic_mode": True,
+            }
+    except Exception as exc:
+        logger.warning("AI startup connectivity check skipped: %s", exc)
+        ai_status = {
+            "status": "unavailable",
+            "message": "AI 启动自检失败，系统进入基础模式",
+            "basic_mode": True,
+        }
 
     return {
         "directories": [str(path) for path in directories],
@@ -52,6 +72,7 @@ def run_startup_checks(settings: AppSettings) -> dict[str, object]:
         "migrations": migrations,
         "integrity": integrity,
         "removable_root": str(removable_root) if removable_root else None,
+        "ai": ai_status,
     }
 
 

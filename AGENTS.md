@@ -30,6 +30,7 @@
 - `docs/phase-5-delivery.md`
 - `docs/phase-6-delivery.md`
 - `docs/phase-7-delivery.md`
+- `docs/phase-8-delivery.md`
 
 当前已完成：
 
@@ -40,10 +41,11 @@
 - 阶段 5：课堂公告与 WebSocket 实时通信
 - 阶段 6：课堂互动问答 P0
 - 阶段 7：作业管理 P0
+- 阶段 8：AI 管理、降级与内容安全
 
 后续应按实施方案阶段继续推进，通常下一步是：
 
-- 阶段 8：AI 管理、降级与内容安全
+- 阶段 9：P1 增强功能开发
 
 ## 技术栈
 
@@ -98,6 +100,7 @@ backend/
       network.py       网卡候选地址、端口与防火墙引导
       questions.py     课堂问答、答题、自动判分和统计服务
       homework.py      作业发布、提交、版本和提交统计服务
+      ai.py            AI Provider 配置、自检、降级任务和内容安全服务
       startup.py       启动检查、目录初始化、U 盘路径识别、自动备份任务
     main.py            FastAPI 应用入口
   run.py               Uvicorn 启动入口，含端口备选逻辑
@@ -130,6 +133,7 @@ docs/
   phase-5-delivery.md  阶段 5 交付说明
   phase-6-delivery.md  阶段 6 交付说明
   phase-7-delivery.md  阶段 7 交付说明
+  phase-8-delivery.md  阶段 8 交付说明
 ```
 
 ## 后端运行
@@ -247,19 +251,19 @@ npm 如遇下载慢，可考虑设置国内 registry，但不要无故改动锁�
 
 下一阶段建议优先实现：
 
-1. AI provider 配置模型和接口，支持 base_url、模型名、API Key、代理和启用状态。
-2. 启动时或教师手动触发 AI 连通性自检。
-3. AI 不可用时展示基础模式提示，不影响签到、答题、作业提交和统计。
-4. 建立 AI 调用失败处理入口，为后续简答反馈、作业批阅和学习评估降级到人工处理。
-5. 建立 AI 返回内容安全检查，支持长度截断、关键词过滤和展示策略配置。
+1. 导入增强：错误报告导出、增量导入、学生停用/启用。
+2. 签到增强：签到导出、手动补签、签到状态修改和修改日志。
+3. 问答增强：简答题 AI 反馈降级、加分统计、草稿恢复、答案导出。
+4. 作业增强：AI 批阅、自动评分、教师复核、成绩发布、学生查看反馈和作业导出。
+5. 学习评估：单堂课评估、多指标综合、学生反馈和报表展示。
 
-阶段 8 对应需求重点：
+阶段 9 对应需求重点：
 
-- SYS-AI-01
-- SYS-AI-02
-- SYS-AI-03
-- SYS-AI-04
-- SYS-AI-06
+- D-IM-03/D-IM-08/D-IM-09/D-IM-10
+- S-IN-06/S-IN-07
+- Q-IN-06/Q-IN-07/Q-IN-09/Q-IN-11
+- H-MG-05~H-MG-10
+- E-AS-01~E-AS-08
 
 ## 开发约定
 
@@ -389,3 +393,19 @@ GET  /api/v1/homework/{homework_id}/submissions
 ```
 
 阶段 7 已完成作业管理 P0：教师发布作业，学生提交文本和附件，多次提交版本完整保留，截止控制和迟交标记可用，教师查看作业提交列表。下一阶段按实施方案进入“阶段 8：AI 管理、降级与内容安全”。
+
+## 阶段 8 接口索引
+
+```text
+GET  /api/v1/ai/overview
+POST /api/v1/ai/providers
+PUT  /api/v1/ai/providers/{provider_id}
+POST /api/v1/ai/providers/{provider_id}/activate
+POST /api/v1/ai/check
+PUT  /api/v1/ai/safety
+POST /api/v1/ai/safety/check
+GET  /api/v1/ai/failure-tasks
+POST /api/v1/ai/failure-tasks
+```
+
+阶段 8 已完成 AI 管理、降级与内容安全：教师可配置并切换 AI Provider，启动和手动自检可用，AI 不可用时基础模式提示可用，降级任务入口和内容安全检查可用。下一阶段按实施方案进入“阶段 9：P1 增强功能开发”。
