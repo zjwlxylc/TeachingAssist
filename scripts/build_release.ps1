@@ -52,6 +52,27 @@ if (-not $SkipPyInstaller) {
 }
 
 Copy-Item -Path (Join-Path $Root "config") -Destination (Join-Path $PackageRoot "config") -Recurse -Force
+@"
+environment: production
+api_prefix: /api/v1
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  fallback_ports:
+    - 8081
+    - 8888
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+
+storage:
+  local_root: C:/TeachingAssist
+
+logging:
+  level: INFO
+  file_name: teaching_assist.log
+"@ | Set-Content -Encoding UTF8 -Path (Join-Path $PackageRoot "config\local.yaml")
 Copy-Item -Path (Join-Path $Root "frontend\dist") -Destination (Join-Path $PackageRoot "frontend\dist") -Recurse -Force
 Copy-Item -Path (Join-Path $Root "scripts\start_teaching_assist.bat") -Destination $PackageRoot -Force
 Copy-Item -Path (Join-Path $Root "scripts\make_usb_package.ps1") -Destination $PackageRoot -Force

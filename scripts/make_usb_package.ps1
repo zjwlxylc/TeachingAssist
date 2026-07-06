@@ -20,7 +20,6 @@ New-Item -ItemType Directory -Force -Path $PackageRoot, $BackupRoot, $DocsRoot, 
 Copy-Item -Path "$PSScriptRoot\*" -Destination $PackageRoot -Recurse -Force -Exclude "make_usb_package.ps1"
 
 @"
-app_name: 大学教学过程辅助软件
 environment: production
 api_prefix: /api/v1
 
