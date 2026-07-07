@@ -193,6 +193,16 @@ const EVALUATION_WEIGHT_FIELDS = [
 
 type EvaluationWeightKey = (typeof EVALUATION_WEIGHT_FIELDS)[number]["key"];
 type EvaluationWeights = Record<EvaluationWeightKey, number | string>;
+type TeacherSectionKey =
+  | "system"
+  | "ai"
+  | "preparation"
+  | "classroom"
+  | "questions"
+  | "homework"
+  | "evaluation"
+  | "announcements"
+  | "interaction";
 
 const DEFAULT_EVALUATION_WEIGHTS: EvaluationWeights = {
   attendance_weight: 20,
@@ -207,6 +217,18 @@ function pickEvaluationWeights(weights: Record<string, number | string>): Evalua
     EVALUATION_WEIGHT_FIELDS.map((field) => [field.key, weights[field.key] ?? DEFAULT_EVALUATION_WEIGHTS[field.key]])
   ) as EvaluationWeights;
 }
+
+const TEACHER_SECTIONS: Array<{ key: TeacherSectionKey; label: string; description: string }> = [
+  { key: "system", label: "系统与备份", description: "服务状态、启动检查、访问地址" },
+  { key: "ai", label: "AI 管理", description: "Provider、自检、内容安全" },
+  { key: "preparation", label: "课前准备", description: "课程、班级、课堂、导入" },
+  { key: "classroom", label: "课堂签到", description: "开课、签到、请假、设备预警" },
+  { key: "questions", label: "课堂问答", description: "发布题目、统计、加分" },
+  { key: "homework", label: "课堂作业", description: "发布、提交、批阅、成绩" },
+  { key: "evaluation", label: "学习评估", description: "权重、评估、恢复记录" },
+  { key: "announcements", label: "课堂公告", description: "教师正式通知" },
+  { key: "interaction", label: "课堂互动", description: "自由留言、发言开关" }
+];
 
 export function TeacherPage() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -303,6 +325,7 @@ export function TeacherPage() {
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState("");
   const [previewing, setPreviewing] = useState(false);
+  const [activeTeacherSection, setActiveTeacherSection] = useState<TeacherSectionKey>("system");
   const { isAuthenticated, setTeacherSession, logout: clearSession } = useAuthStore();
 
   /** Session status: raw English → Chinese label */
@@ -1222,7 +1245,57 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {health && (
+      {isAuthenticated && (
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", md: "260px minmax(0, 1fr)" },
+            gap: 2,
+            alignItems: "start"
+          }}
+        >
+          <Paper
+            variant="outlined"
+            sx={{
+              position: { xs: "static", md: "sticky" },
+              top: { md: 16 },
+              p: 1,
+              maxHeight: { md: "calc(100vh - 120px)" },
+              overflow: "auto"
+            }}
+          >
+            <Stack spacing={0.75}>
+              {TEACHER_SECTIONS.map((section) => (
+                <Button
+                  key={section.key}
+                  fullWidth
+                  variant={activeTeacherSection === section.key ? "contained" : "text"}
+                  onClick={() => setActiveTeacherSection(section.key)}
+                  sx={{
+                    justifyContent: "flex-start",
+                    alignItems: "flex-start",
+                    textAlign: "left",
+                    py: 1,
+                    px: 1.25,
+                    minHeight: 58
+                  }}
+                >
+                  <Box>
+                    <Typography component="span" sx={{ display: "block", fontWeight: 700, lineHeight: 1.3 }}>
+                      {section.label}
+                    </Typography>
+                    <Typography component="span" sx={{ display: "block", fontSize: "0.75rem", opacity: 0.78, lineHeight: 1.4 }}>
+                      {section.description}
+                    </Typography>
+                  </Box>
+                </Button>
+              ))}
+            </Stack>
+          </Paper>
+
+          <Stack spacing={3} sx={{ minWidth: 0 }}>
+
+      {health && activeTeacherSection === "system" && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={4}>
             <Card>
@@ -1270,7 +1343,7 @@ export function TeacherPage() {
         </Grid>
       )}
 
-      {startup && isAuthenticated && (
+      {startup && isAuthenticated && activeTeacherSection === "system" && (
         <Card>
           <CardContent>
             <Typography variant="h2">启动检查</Typography>
@@ -1290,7 +1363,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && aiOverview && (
+      {isAuthenticated && activeTeacherSection === "ai" && aiOverview && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -1492,7 +1565,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "preparation" && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -1801,7 +1874,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "evaluation" && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -1961,7 +2034,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "classroom" && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -2169,7 +2242,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && accessInfo && (
+      {isAuthenticated && activeTeacherSection === "system" && accessInfo && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={7}>
             <Card>
@@ -2252,7 +2325,7 @@ export function TeacherPage() {
         </Grid>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "questions" && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -2546,7 +2619,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "homework" && (
         <Card>
           <CardContent>
             <Stack spacing={2.5}>
@@ -2785,7 +2858,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "announcements" && (
         <Card>
           <CardContent>
             <Stack spacing={2}>
@@ -2851,7 +2924,7 @@ export function TeacherPage() {
         </Card>
       )}
 
-      {isAuthenticated && (
+      {isAuthenticated && activeTeacherSection === "interaction" && (
         <Card>
           <CardContent>
             <Stack spacing={2}>
@@ -2929,6 +3002,10 @@ export function TeacherPage() {
             </Stack>
           </CardContent>
         </Card>
+      )}
+
+          </Stack>
+        </Box>
       )}
 
       <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />

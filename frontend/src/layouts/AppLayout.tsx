@@ -73,7 +73,7 @@ export function AppLayout({ children }: PropsWithChildren) {
           </Stack>
         </Toolbar>
       </AppBar>
-      <Container maxWidth="lg" sx={{ py: { xs: 1.5, sm: 3 }, px: { xs: 1, sm: 3 } }}>
+      <Container maxWidth="xl" sx={{ py: { xs: 1.5, sm: 3 }, px: { xs: 1, sm: 3 } }}>
         {children}
       </Container>
 
