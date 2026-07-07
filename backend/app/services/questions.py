@@ -458,13 +458,11 @@ def _resolve_student(connection: Any, session: dict[str, Any], student_number: s
         """
         SELECT s.*
         FROM students s
-        JOIN course_students cs ON cs.student_id = s.id
         WHERE s.student_id = ?
-          AND cs.course_id = ?
-          AND cs.class_id = ?
+          AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?)
           AND s.is_active = 1
         """,
-        (student_number.strip(), session["course_id"], session["class_id"]),
+        (student_number.strip(), session["id"]),
     ).fetchone()
     if row is None:
         raise AppError("未找到该学号，或不在本课堂名单中", code="STUDENT_NOT_FOUND", status_code=404)
@@ -635,11 +633,10 @@ def get_question_stats(question_id: int) -> dict[str, Any]:
         roster = connection.execute(
             """
             SELECT COUNT(*) AS total
-            FROM course_students cs
-            JOIN students s ON s.id = cs.student_id
-            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+            FROM students s
+            WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
             """,
-            (session["course_id"], session["class_id"]),
+            (session["id"],),
         ).fetchone()
         total_students = int(roster["total"] if roster else 0)
         answers = connection.execute(

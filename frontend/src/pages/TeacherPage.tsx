@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -11,7 +11,9 @@ import {
   Divider,
   FormControlLabel,
   FormControl,
+  FormGroup,
   Grid,
+  IconButton,
   InputLabel,
   MenuItem,
   Paper,
@@ -46,6 +48,8 @@ import AssessmentIcon from "@mui/icons-material/Assessment";
 import DownloadIcon from "@mui/icons-material/Download";
 import RestoreIcon from "@mui/icons-material/Restore";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import EditIcon from "@mui/icons-material/Edit";
+import VisibilityIcon from "@mui/icons-material/Visibility";
 
 import {
   ClassGroup,
@@ -67,6 +71,7 @@ import {
   previewStudentImport,
   setStudentActive,
   suggestStudentImportMapping,
+  updateClassName,
   uploadStudentExcel
 } from "../api/academic";
 import { fetchAuthStatus, login, setupPassword, AuthStatus } from "../api/auth";
@@ -154,12 +159,25 @@ import {
   updateInteractionSettings
 } from "../api/interactions";
 import {
+  ConversationSummary,
+  MessageCreated,
+  PrivateMessage,
+  ThreadStudent,
+  fetchConversations,
+  fetchTeacherThread,
+  fetchUnreadCount,
+  messageSocketUrl,
+  replyToStudent
+} from "../api/messages";
+import {
   applyRecoveryAction,
   fetchRecoveryEvents,
   recordInterruption
 } from "../api/recovery";
+import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useAuthStore } from "../store/authStore";
+import { useStatusStore } from "../store/statusStore";
 
 const QUESTION_TYPE_LABELS: Record<QuestionType, string> = {
   single_choice: "单选题",
@@ -197,12 +215,14 @@ type TeacherSectionKey =
   | "system"
   | "ai"
   | "preparation"
+  | "classgroup"
   | "classroom"
   | "questions"
   | "homework"
   | "evaluation"
   | "announcements"
-  | "interaction";
+  | "interaction"
+  | "messages";
 
 const DEFAULT_EVALUATION_WEIGHTS: EvaluationWeights = {
   attendance_weight: 20,
@@ -221,13 +241,15 @@ function pickEvaluationWeights(weights: Record<string, number | string>): Evalua
 const TEACHER_SECTIONS: Array<{ key: TeacherSectionKey; label: string; description: string }> = [
   { key: "system", label: "系统与备份", description: "服务状态、启动检查、访问地址" },
   { key: "ai", label: "AI 管理", description: "Provider、自检、内容安全" },
-  { key: "preparation", label: "课前准备", description: "课程、班级、课堂、导入" },
+  { key: "preparation", label: "课前准备", description: "选课程、勾选上课班级、建课堂" },
+  { key: "classgroup", label: "班级管理", description: "建班级、导入学生（一次性）" },
   { key: "classroom", label: "课堂签到", description: "开课、签到、请假、设备预警" },
   { key: "questions", label: "课堂问答", description: "发布题目、统计、加分" },
   { key: "homework", label: "课堂作业", description: "发布、提交、批阅、成绩" },
   { key: "evaluation", label: "学习评估", description: "权重、评估、恢复记录" },
   { key: "announcements", label: "课堂公告", description: "教师正式通知" },
-  { key: "interaction", label: "课堂互动", description: "自由留言、发言开关" }
+  { key: "interaction", label: "课堂互动", description: "自由留言、发言开关" },
+  { key: "messages", label: "私信", description: "学生私聊、回复" }
 ];
 
 export function TeacherPage() {
@@ -246,12 +268,23 @@ export function TeacherPage() {
   const [className, setClassName] = useState("");
   const [selectedCourseId, setSelectedCourseId] = useState<number | "">("");
   const [selectedClassId, setSelectedClassId] = useState<number | "">("");
+  const [selectedClassIds, setSelectedClassIds] = useState<number[]>([]);
+  const [courseLinkedClasses, setCourseLinkedClasses] = useState<ClassGroup[]>([]);
+  const [importTargetClassId, setImportTargetClassId] = useState<number | "">("");
+  const [editingClassId, setEditingClassId] = useState<number | null>(null);
+  const [editingClassName, setEditingClassName] = useState("");
+  const [selectedClassViewId, setSelectedClassViewId] = useState<number | null>(null);
+  const [classStudents, setClassStudents] = useState<Student[]>([]);
+  const [loadingClassStudents, setLoadingClassStudents] = useState(false);
   const [sessionTitle, setSessionTitle] = useState("");
   const [sessionNo, setSessionNo] = useState<number | "">("");
   const [sessionStart, setSessionStart] = useState("");
   const [sessionEnd, setSessionEnd] = useState("");
   const [isMakeup, setIsMakeup] = useState(false);
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState<string>("");
   const [fieldMapping, setFieldMapping] = useState<Record<number, string>>({});
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [duplicateStrategy, setDuplicateStrategy] = useState<"merge" | "overwrite" | "skip">("merge");
@@ -267,6 +300,13 @@ export function TeacherPage() {
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [selectedMessageStudentPk, setSelectedMessageStudentPk] = useState<number | "">("");
+  const [messageThread, setMessageThread] = useState<PrivateMessage[]>([]);
+  const [messageThreadStudent, setMessageThreadStudent] = useState<ThreadStudent | null>(null);
+  const [messageReplyContent, setMessageReplyContent] = useState("");
+  const [messageUnreadTotal, setMessageUnreadTotal] = useState(0);
+  const messageSocketRef = useRef<TeachingAssistSocket | null>(null);
   const [questionSessionId, setQuestionSessionId] = useState<number | "">("");
   const [questionTitle, setQuestionTitle] = useState("");
   const [questionContent, setQuestionContent] = useState("");
@@ -338,9 +378,22 @@ export function TeacherPage() {
         setHealth(healthData);
         setStartup(startupData);
         setAuthStatus(authData);
+        useStatusStore.getState().setTeacherStatus(healthData.status, healthData.database_integrity);
       })
       .catch((err: Error) => setError(err.message));
   }, []);
+
+  // 当前课程变化时，加载该课程已关联的班级，供“课前准备”勾选上课班级
+  useEffect(() => {
+    if (selectedCourseId === "") {
+      setCourseLinkedClasses([]);
+      setSelectedClassIds([]);
+      return;
+    }
+    fetchClasses(Number(selectedCourseId))
+      .then(setCourseLinkedClasses)
+      .catch(() => setCourseLinkedClasses([]));
+  }, [selectedCourseId]);
 
   // Auto-logout when backend reports token expired (401)
   useEffect(() => {
@@ -371,6 +424,7 @@ export function TeacherPage() {
         setAccessInfo(accessData);
         setSelectedIp(accessData.selected_ip);
         setSelectedPort(accessData.port);
+        useStatusStore.getState().setTeacherAccessUrl(accessData.access_url);
         applyAiOverview(aiData);
         setAiFailureTaskCount(aiTasks.length);
         setBackups(backupData);
@@ -557,11 +611,66 @@ export function TeacherPage() {
       const klass = await createClass(className);
       setClassName("");
       setSelectedClassId(klass.id);
+      setImportTargetClassId(klass.id);
       await reloadAcademic();
-      setMessage("班级已创建");
+      setMessage("班级已创建，可在下方导入学生名单");
     } catch (err) {
       setError((err as Error).message);
     }
+  }
+
+  function handleStartRename(klass: ClassGroup) {
+    setEditingClassId(klass.id);
+    setEditingClassName(klass.name);
+  }
+
+  function handleCancelRename() {
+    setEditingClassId(null);
+    setEditingClassName("");
+  }
+
+  async function handleSaveRename() {
+    if (editingClassId === null) return;
+    const newName = editingClassName.trim();
+    if (!newName) {
+      setError("班级名称不能为空");
+      return;
+    }
+    try {
+      await updateClassName(editingClassId, newName);
+      setEditingClassId(null);
+      setEditingClassName("");
+      await reloadAcademic();
+      if (selectedClassViewId === editingClassId) {
+        await fetchClassStudents(editingClassId);
+      }
+      setMessage("班级已重命名");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function fetchClassStudents(classId: number) {
+    setLoadingClassStudents(true);
+    try {
+      const students = await fetchStudents(undefined, classId, true);
+      setClassStudents(students);
+    } catch (err) {
+      setError((err as Error).message);
+      setClassStudents([]);
+    } finally {
+      setLoadingClassStudents(false);
+    }
+  }
+
+  async function handleSelectClassForStudents(klass: ClassGroup) {
+    if (selectedClassViewId === klass.id) {
+      setSelectedClassViewId(null);
+      setClassStudents([]);
+      return;
+    }
+    setSelectedClassViewId(klass.id);
+    await fetchClassStudents(klass.id);
   }
 
   async function handleLinkCourseClass() {
@@ -579,14 +688,14 @@ export function TeacherPage() {
   }
 
   async function handleCreateSession() {
-    if (!selectedCourseId || !selectedClassId || !sessionTitle || !sessionNo) {
-      setError("请填写课程、班级、课堂标题和课次");
+    if (!selectedCourseId || selectedClassIds.length === 0 || !sessionTitle || !sessionNo) {
+      setError("请填写课程、至少选择一个上课班级、课堂标题和课次");
       return;
     }
     try {
       await createSession({
         course_id: Number(selectedCourseId),
-        class_id: Number(selectedClassId),
+        class_ids: selectedClassIds,
         title: sessionTitle,
         session_no: Number(sessionNo),
         start_time: sessionStart || undefined,
@@ -598,6 +707,7 @@ export function TeacherPage() {
       setSessionStart("");
       setSessionEnd("");
       setIsMakeup(false);
+      setSelectedClassIds([]);
       await reloadAcademic();
       setMessage("课堂已创建");
     } catch (err) {
@@ -605,14 +715,14 @@ export function TeacherPage() {
     }
   }
 
-  async function handleExcelUpload(file: File | null) {
+  async function handleExcelUpload(file: File | null, sheetName?: string) {
     if (!file) {
       return;
     }
     setUploading(true);
     setUploadError("");
     try {
-      const job = await uploadStudentExcel(file);
+      const job = await uploadStudentExcel(file, sheetName);
       const suggested: Record<number, string> = {};
       job.headers.forEach((header, idx) => {
         const match = Object.entries(job.standard_fields).find(([, label]) =>
@@ -622,8 +732,11 @@ export function TeacherPage() {
           suggested[idx] = match[0];
         }
       });
+      setImportFile(file);
       setImportJob(job);
       setFieldMapping(suggested);
+      setSheetNames(job.sheet_names ?? []);
+      setSelectedSheet(job.selected_sheet ?? job.active_sheet ?? "");
       setImportPreview(null);
       setMessage("Excel 已解析");
     } catch (err) {
@@ -682,8 +795,8 @@ export function TeacherPage() {
       setConfirmError("请先上传 Excel 文件");
       return;
     }
-    if (!selectedCourseId) {
-      setConfirmError("请先在上方选择一个课程，再确认导入");
+    if (!importTargetClassId) {
+      setConfirmError("请先在右侧选择一个导入目标班级，再确认导入");
       return;
     }
     if (!importPreview) {
@@ -702,7 +815,7 @@ export function TeacherPage() {
       });
       const result = await confirmStudentImport(
         importJob.job_id,
-        Number(selectedCourseId),
+        Number(importTargetClassId),
         headerMapping,
         true,
         duplicateStrategy
@@ -873,6 +986,80 @@ export function TeacherPage() {
       setError((err as Error).message);
     }
   }
+
+  async function handleLoadConversations() {
+    try {
+      const [list, unread] = await Promise.all([fetchConversations(), fetchUnreadCount()]);
+      setConversations(list);
+      setMessageUnreadTotal(unread.unread_count);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSelectConversation(studentPk: number) {
+    try {
+      setSelectedMessageStudentPk(studentPk);
+      const thread = await fetchTeacherThread(studentPk);
+      setMessageThreadStudent(thread.student);
+      setMessageThread(thread.messages);
+      await handleLoadConversations();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleReplyMessage() {
+    if (!selectedMessageStudentPk || !messageReplyContent.trim()) {
+      setError("请选择会话并填写回复内容");
+      return;
+    }
+    try {
+      await replyToStudent(Number(selectedMessageStudentPk), messageReplyContent);
+      setMessageReplyContent("");
+      const thread = await fetchTeacherThread(Number(selectedMessageStudentPk));
+      setMessageThread(thread.messages);
+      setMessage(`${thread.student.name}：回复已发送`);
+      await handleLoadConversations();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    if (!isAuthenticated || activeTeacherSection !== "messages") {
+      return undefined;
+    }
+    const token = localStorage.getItem("teacher_token") ?? undefined;
+    const socket = new TeachingAssistSocket(
+      messageSocketUrl(token),
+      (event) => {
+        const payload = JSON.parse(event.data) as MessageCreated;
+        if (payload.type === "message.created" && payload.message.sender_role === "student") {
+          const pk = payload.message.sender_student_id;
+          void handleLoadConversations();
+          if (pk != null && pk === selectedMessageStudentPk) {
+            void fetchTeacherThread(pk).then((thread) => {
+              setMessageThread(thread.messages);
+              setMessage(`收到 ${thread.student.name} 的新私信`);
+            });
+          } else {
+            setMessage(`收到来自 ${payload.message.sender_name} 的新私信`);
+          }
+        }
+      },
+      3000
+    );
+    messageSocketRef.current = socket;
+    socket.connect();
+    void handleLoadConversations();
+    const timer = window.setInterval(() => void handleLoadConversations(), 15000);
+    return () => {
+      socket.close();
+      messageSocketRef.current = null;
+      window.clearInterval(timer);
+    };
+  }, [isAuthenticated, activeTeacherSection, selectedMessageStudentPk]);
 
   async function handleLoadQuestions(sessionId: number) {
     try {
@@ -1196,17 +1383,15 @@ export function TeacherPage() {
     clearSession();
     setAccessInfo(null);
     setBackups([]);
+    useStatusStore.getState().setTeacherStatus(null, null);
+    useStatusStore.getState().setTeacherAccessUrl(null);
     setMessage("已退出登录");
   }
 
   return (
     <Stack spacing={3}>
-      <Box>
-        <Typography variant="h1">教师工作台</Typography>
-        <Typography color="text.secondary" sx={{ mt: 0.75 }}>
-          系统管理、教师认证、访问地址和数据库备份已接入。
-        </Typography>
-      </Box>
+      {/* 页面标题（状态信息已移至全局标题栏，见 AppLayout） */}
+      <Typography variant="h1">教师工作台</Typography>
 
       {error && <Alert severity="error">{error}</Alert>}
       {!health && !authStatus && !error && <CircularProgress size={28} />}
@@ -1572,7 +1757,8 @@ export function TeacherPage() {
               <Box>
                 <Typography variant="h2">课前准备</Typography>
                 <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-                  创建课程、班级、课堂，并导入学生名单。
+                  第一步选课程，第二步勾选本次上课的班级（可多选），第三步填写课次与标题创建课堂。
+                  学生名单在「班级管理」中按班级一次性导入，无需在此重复导入。
                 </Typography>
               </Box>
 
@@ -1580,7 +1766,7 @@ export function TeacherPage() {
                 <Grid item xs={12} md={4}>
                   <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
                     <Stack spacing={1.5}>
-                      <Typography fontWeight={700}>课程</Typography>
+                      <Typography fontWeight={700}>① 课程</Typography>
                       <TextField label="课程名称" value={courseName} onChange={(event) => setCourseName(event.target.value)} />
                       <TextField label="任课教师" value={teacherName} onChange={(event) => setTeacherName(event.target.value)} />
                       <Button variant="contained" startIcon={<AddIcon />} onClick={handleCreateCourse}>
@@ -1608,16 +1794,41 @@ export function TeacherPage() {
                 <Grid item xs={12} md={4}>
                   <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
                     <Stack spacing={1.5}>
-                      <Typography fontWeight={700}>班级</Typography>
-                      <TextField label="班级名称" value={className} onChange={(event) => setClassName(event.target.value)} />
-                      <Button variant="contained" startIcon={<AddIcon />} onClick={handleCreateClass}>
-                        创建班级
+                      <Typography fontWeight={700}>② 上课班级（多选）</Typography>
+                      {selectedCourseId === "" ? (
+                        <Alert severity="warning">请先在①选择课程</Alert>
+                      ) : courseLinkedClasses.length === 0 ? (
+                        <Alert severity="info">本课程尚未关联班级，请在「班级管理」中创建并关联班级。</Alert>
+                      ) : (
+                        <FormGroup>
+                          {courseLinkedClasses.map((klass) => (
+                            <FormControlLabel
+                              key={klass.id}
+                              control={
+                                <Checkbox
+                                  checked={selectedClassIds.includes(klass.id)}
+                                  onChange={(event) =>
+                                    setSelectedClassIds((prev) =>
+                                      event.target.checked
+                                        ? [...prev, klass.id]
+                                        : prev.filter((id) => id !== klass.id)
+                                    )
+                                  }
+                                />
+                              }
+                              label={`${klass.name}（${klass.student_count ?? 0} 人）`}
+                            />
+                          ))}
+                        </FormGroup>
+                      )}
+                      <Button variant="outlined" startIcon={<AddIcon />} onClick={handleCreateClass}>
+                        新建班级
                       </Button>
                       <FormControl fullWidth>
-                        <InputLabel id="class-select-label">当前班级</InputLabel>
+                        <InputLabel id="link-class-label">待关联班级</InputLabel>
                         <Select
-                          labelId="class-select-label"
-                          label="当前班级"
+                          labelId="link-class-label"
+                          label="待关联班级"
                           value={selectedClassId}
                           onChange={(event) => setSelectedClassId(Number(event.target.value))}
                         >
@@ -1628,7 +1839,7 @@ export function TeacherPage() {
                           ))}
                         </Select>
                       </FormControl>
-                      <Button variant="outlined" startIcon={<LinkIcon />} onClick={handleLinkCourseClass}>
+                      <Button variant="outlined" startIcon={<LinkIcon />} onClick={handleLinkCourseClass} disabled={!selectedCourseId || !selectedClassId}>
                         关联课程班级
                       </Button>
                     </Stack>
@@ -1638,7 +1849,7 @@ export function TeacherPage() {
                 <Grid item xs={12} md={4}>
                   <Paper variant="outlined" sx={{ p: 2, height: "100%" }}>
                     <Stack spacing={1.5}>
-                      <Typography fontWeight={700}>课堂</Typography>
+                      <Typography fontWeight={700}>③ 课堂</Typography>
                       <TextField label="课堂标题" value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} />
                       <TextField
                         label="课次"
@@ -1664,15 +1875,138 @@ export function TeacherPage() {
                         control={<Checkbox checked={isMakeup} onChange={(event) => setIsMakeup(event.target.checked)} />}
                         label="补课课堂"
                       />
-                      <Button variant="contained" startIcon={<EventIcon />} onClick={handleCreateSession}>
+                      <Button variant="contained" startIcon={<EventIcon />} onClick={handleCreateSession} disabled={selectedClassIds.length === 0}>
                         创建课堂
                       </Button>
+                      {selectedClassIds.length === 0 && (
+                        <Alert severity="warning">请先在②中勾选至少一个上课班级</Alert>
+                      )}
                     </Stack>
                   </Paper>
                 </Grid>
               </Grid>
 
               <Divider />
+
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={6}>
+                  <Typography fontWeight={700} sx={{ mb: 1 }}>
+                    已创建课堂
+                  </Typography>
+                  <Stack spacing={1}>
+                    {sessions.slice(0, 5).map((session) => (
+                      <Box key={session.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                          <Typography fontWeight={500}>
+                            第 {session.session_no} 次：{session.title}
+                          </Typography>
+                          <Chip
+                            label={sessionStatusLabel(session.status)}
+                            size="small"
+                            color={session.status === "active" ? "success" : session.status === "ended" ? "default" : "warning"}
+                            variant="outlined"
+                          />
+                        </Box>
+                        <Typography color="text.secondary" variant="body2">
+                          {session.course_name} / {session.class_name}
+                        </Typography>
+                      </Box>
+                    ))}
+                    {sessions.length === 0 && <Typography color="text.secondary">暂无课堂</Typography>}
+                  </Stack>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Typography fontWeight={700} sx={{ mb: 1 }}>
+                    学生名单
+                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={showInactiveStudents}
+                        onChange={(event) => setShowInactiveStudents(event.target.checked)}
+                      />
+                    }
+                    label="显示停用学生"
+                  />
+                  <Stack spacing={1}>
+                    {students.slice(0, 8).map((student) => (
+                      <Box key={student.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                        <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
+                          <Box>
+                            <Typography>
+                              {student.student_id} / {student.name}
+                              {!student.is_active && <Chip size="small" color="default" label="已停用" sx={{ ml: 1 }} />}
+                            </Typography>
+                            <Typography color="text.secondary">{student.class_name}</Typography>
+                          </Box>
+                          <Button size="small" variant="outlined" onClick={() => handleToggleStudentActive(student)}>
+                            {student.is_active ? "停用" : "启用"}
+                          </Button>
+                        </Stack>
+                      </Box>
+                    ))}
+                    {students.length === 0 && <Typography color="text.secondary">暂无学生</Typography>}
+                  </Stack>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && activeTeacherSection === "classgroup" && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2.5}>
+              <Box>
+                <Typography variant="h2">班级管理</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  在此新建行政班级，并按班级一次性导入学生名单（学生随班级走，无需每堂课重复导入）。
+                  导入前请先在下方选择目标班级，再上传 Excel。
+                </Typography>
+              </Box>
+
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Stack spacing={1.5}>
+                  <Typography fontWeight={700}>① 班级</Typography>
+                  <TextField
+                    label="班级名称"
+                    value={className}
+                    onChange={(event) => setClassName(event.target.value)}
+                    placeholder="如：物联网25A1"
+                    fullWidth
+                  />
+                  <Button
+                    variant="contained"
+                    startIcon={<AddIcon />}
+                    onClick={handleCreateClass}
+                    disabled={!className.trim()}
+                  >
+                    新建班级
+                  </Button>
+                  {!className.trim() && (
+                    <Alert severity="info">请先填写班级名称，再点击新建班级</Alert>
+                  )}
+                  <FormControl fullWidth>
+                    <InputLabel id="import-target-class-label">导入目标班级</InputLabel>
+                    <Select
+                      labelId="import-target-class-label"
+                      label="导入目标班级"
+                      value={importTargetClassId}
+                      onChange={(event) => setImportTargetClassId(Number(event.target.value))}
+                    >
+                      {classes.map((klass) => (
+                        <MenuItem key={klass.id} value={klass.id}>
+                          {klass.name}（{klass.student_count ?? 0} 人）
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {importTargetClassId === "" && (
+                    <Alert severity="warning">请先选择导入目标班级，再确认导入</Alert>
+                  )}
+                </Stack>
+              </Paper>
 
               <Grid container spacing={2}>
                 <Grid item xs={12} md={5}>
@@ -1694,6 +2028,24 @@ export function TeacherPage() {
                       <Alert severity="info">
                         {importJob.file_name}，共 {importJob.total_rows} 行数据
                       </Alert>
+                    )}
+                    {importJob && sheetNames.length > 1 && (
+                      <FormControl fullWidth size="small">
+                        <InputLabel id="sheet-select-label">选择工作表</InputLabel>
+                        <Select
+                          labelId="sheet-select-label"
+                          label="选择工作表"
+                          value={selectedSheet}
+                          onChange={(event) => handleExcelUpload(importFile, event.target.value as string)}
+                        >
+                          {sheetNames.map((name) => (
+                            <MenuItem key={name} value={name}>
+                              {name}
+                              {name === importJob.active_sheet ? "（默认）" : ""}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
                     )}
                     {importJob && (
                       <Stack spacing={1}>
@@ -1806,69 +2158,106 @@ export function TeacherPage() {
                 </Grid>
               </Grid>
 
-              <Divider />
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Typography fontWeight={700} sx={{ mb: 1 }}>班级列表</Typography>
+                <Stack spacing={0.5}>
+                  {classes.map((klass) => (
+                    <Box
+                      key={klass.id}
+                      sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid", borderColor: "divider", pb: 0.5 }}
+                    >
+                      {editingClassId === klass.id ? (
+                        <TextField
+                          size="small"
+                          value={editingClassName}
+                          onChange={(e) => setEditingClassName(e.target.value)}
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleSaveRename();
+                            if (e.key === "Escape") handleCancelRename();
+                          }}
+                          sx={{ mr: 1 }}
+                        />
+                      ) : (
+                        <Typography>{klass.name}</Typography>
+                      )}
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {editingClassId === klass.id ? (
+                          <>
+                            <Button size="small" variant="contained" onClick={handleSaveRename}>保存</Button>
+                            <Button size="small" onClick={handleCancelRename}>取消</Button>
+                          </>
+                        ) : (
+                          <>
+                            <Typography color="text.secondary">{klass.student_count ?? 0} 人</Typography>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleSelectClassForStudents(klass)}
+                              title="查看该班全部学生"
+                              color={selectedClassViewId === klass.id ? "primary" : "default"}
+                            >
+                              <VisibilityIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" onClick={() => handleStartRename(klass)} title="重命名班级">
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </>
+                        )}
+                      </Box>
+                    </Box>
+                  ))}
+                  {classes.length === 0 && <Typography color="text.secondary">暂无班级，请先新建班级</Typography>}
+                </Stack>
 
-              <Grid container spacing={2}>
-                <Grid item xs={12} md={6}>
-                  <Typography fontWeight={700} sx={{ mb: 1 }}>
-                    已创建课堂
-                  </Typography>
-                  <Stack spacing={1}>
-                    {sessions.slice(0, 5).map((session) => (
-                      <Box key={session.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                        <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
-                          <Typography fontWeight={500}>
-                            第 {session.session_no} 次：{session.title}
-                          </Typography>
-                          <Chip
-                            label={sessionStatusLabel(session.status)}
-                            size="small"
-                            color={session.status === "active" ? "success" : session.status === "ended" ? "default" : "warning"}
-                            variant="outlined"
-                          />
-                        </Box>
-                        <Typography color="text.secondary" variant="body2">
-                          {session.course_name} / {session.class_name}
-                        </Typography>
-                      </Box>
-                    ))}
-                    {sessions.length === 0 && <Typography color="text.secondary">暂无课堂</Typography>}
-                  </Stack>
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <Typography fontWeight={700} sx={{ mb: 1 }}>
-                    学生名单
-                  </Typography>
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={showInactiveStudents}
-                        onChange={(event) => setShowInactiveStudents(event.target.checked)}
-                      />
-                    }
-                    label="显示停用学生"
-                  />
-                  <Stack spacing={1}>
-                    {students.slice(0, 8).map((student) => (
-                      <Box key={student.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                        <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
-                          <Box>
-                            <Typography>
-                              {student.student_id} / {student.name}
-                              {!student.is_active && <Chip size="small" color="default" label="已停用" sx={{ ml: 1 }} />}
-                            </Typography>
-                            <Typography color="text.secondary">{student.class_name}</Typography>
-                          </Box>
-                          <Button size="small" variant="outlined" onClick={() => handleToggleStudentActive(student)}>
-                            {student.is_active ? "停用" : "启用"}
-                          </Button>
-                        </Stack>
-                      </Box>
-                    ))}
-                    {students.length === 0 && <Typography color="text.secondary">暂无学生</Typography>}
-                  </Stack>
-                </Grid>
-              </Grid>
+                {selectedClassViewId !== null && (
+                  <Box sx={{ mt: 2 }}>
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                      <Typography fontWeight={700}>
+                        {classes.find((c) => c.id === selectedClassViewId)?.name ?? "该班级"} · 学生名单（{classStudents.length} 人）
+                      </Typography>
+                      <Button size="small" onClick={() => { setSelectedClassViewId(null); setClassStudents([]); }}>
+                        收起
+                      </Button>
+                    </Stack>
+                    {loadingClassStudents ? (
+                      <CircularProgress size={20} />
+                    ) : (
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>学号</TableCell>
+                            <TableCell>姓名</TableCell>
+                            <TableCell>专业</TableCell>
+                            <TableCell>学院</TableCell>
+                            <TableCell>年级</TableCell>
+                            <TableCell>状态</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {classStudents.map((stu) => (
+                            <TableRow key={stu.id}>
+                              <TableCell>{stu.student_id}</TableCell>
+                              <TableCell>{stu.name}</TableCell>
+                              <TableCell>{stu.major ?? "-"}</TableCell>
+                              <TableCell>{stu.college ?? "-"}</TableCell>
+                              <TableCell>{stu.grade ?? "-"}</TableCell>
+                              <TableCell>{stu.is_active ? "在读" : "停用"}</TableCell>
+                            </TableRow>
+                          ))}
+                          {classStudents.length === 0 && (
+                            <TableRow>
+                              <TableCell colSpan={6}>
+                                <Typography color="text.secondary">该班级暂无学生，可在上方导入</Typography>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </TableBody>
+                      </Table>
+                    )}
+                  </Box>
+                )}
+              </Paper>
+
             </Stack>
           </CardContent>
         </Card>
@@ -2997,6 +3386,123 @@ export function TeacherPage() {
                       )}
                     </Stack>
                   </Paper>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && activeTeacherSection === "messages" && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2}>
+              <Box>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="h2">学生私信</Typography>
+                  {messageUnreadTotal > 0 && (
+                    <Chip size="small" color="error" label={`未读 ${messageUnreadTotal}`} />
+                  )}
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  学生与老师的 1:1 私聊，仅双方可见；点开会话即标记已读。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={4}>
+                  <Paper variant="outlined" sx={{ p: 1, maxHeight: 420, overflow: "auto" }}>
+                    <Stack spacing={0.5}>
+                      {conversations.map((conv) => (
+                        <Button
+                          key={conv.student_pk}
+                          fullWidth
+                          variant={selectedMessageStudentPk === conv.student_pk ? "contained" : "outlined"}
+                          onClick={() => handleSelectConversation(conv.student_pk)}
+                          sx={{ justifyContent: "flex-start", textAlign: "left", textTransform: "none" }}
+                        >
+                          <Box sx={{ width: "100%" }}>
+                            <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                              <Typography fontWeight={700}>{conv.student_name}</Typography>
+                              {conv.unread_count > 0 && (
+                                <Chip size="small" color="error" label={conv.unread_count} />
+                              )}
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary" noWrap display="block">
+                              {conv.student_number}
+                              {conv.class_name ? ` / ${conv.class_name}` : ""}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" noWrap display="block">
+                              {conv.last_message}
+                            </Typography>
+                          </Box>
+                        </Button>
+                      ))}
+                      {conversations.length === 0 && (
+                        <Typography color="text.secondary" sx={{ p: 1 }}>
+                          暂无学生私信。
+                        </Typography>
+                      )}
+                    </Stack>
+                  </Paper>
+                </Grid>
+                <Grid item xs={12} md={8}>
+                  {messageThreadStudent ? (
+                    <Stack spacing={1.5}>
+                      <Typography fontWeight={700}>
+                        {messageThreadStudent.name}（{messageThreadStudent.student_id}）
+                      </Typography>
+                      <Paper variant="outlined" sx={{ p: 2, minHeight: 220, maxHeight: 360, overflow: "auto" }}>
+                        <Stack spacing={1}>
+                          {messageThread.map((item) => (
+                            <Box
+                              key={item.id}
+                              sx={{ display: "flex", justifyContent: item.sender_role === "teacher" ? "flex-end" : "flex-start" }}
+                            >
+                              <Paper
+                                variant="outlined"
+                                sx={{
+                                  p: 1.5,
+                                  maxWidth: "80%",
+                                  bgcolor: item.sender_role === "teacher" ? "primary.main" : "background.paper",
+                                  color: item.sender_role === "teacher" ? "primary.contrastText" : "text.primary",
+                                }}
+                              >
+                                <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
+                                  {item.sender_role === "teacher" ? "我" : item.sender_name} · {item.created_at}
+                                </Typography>
+                              </Paper>
+                            </Box>
+                          ))}
+                          {messageThread.length === 0 && (
+                            <Typography color="text.secondary">还没有消息，发条回复开始对话。</Typography>
+                          )}
+                        </Stack>
+                      </Paper>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <TextField
+                          label="回复内容"
+                          value={messageReplyContent}
+                          onChange={(event) => setMessageReplyContent(event.target.value)}
+                          helperText={`${messageReplyContent.length}/500`}
+                          inputProps={{ maxLength: 500 }}
+                          fullWidth
+                        />
+                        <Button
+                          variant="contained"
+                          startIcon={<SendIcon />}
+                          onClick={handleReplyMessage}
+                          sx={{ minWidth: 120 }}
+                        >
+                          回复
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  ) : (
+                    <Paper variant="outlined" sx={{ p: 4, textAlign: "center" }}>
+                      <Typography color="text.secondary">从左侧选择一个学生的会话开始回复。</Typography>
+                    </Paper>
+                  )}
                 </Grid>
               </Grid>
             </Stack>

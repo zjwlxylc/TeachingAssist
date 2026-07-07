@@ -22,6 +22,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Project memory / local agent data (not business code)
+.workbuddy/
+
 # Local packaged artifacts
 build/
 dist/

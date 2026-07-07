@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.api.routes.announcements import ws_router
+from app.api.routes.messages import ws_router as messages_ws_router
 from app.core.config import PROJECT_ROOT, get_settings
 from app.core.exceptions import add_exception_handlers
 from app.core.logging import configure_logging
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     add_exception_handlers(app)
     app.include_router(api_router, prefix=settings.api_prefix)
     app.include_router(ws_router)
+    app.include_router(messages_ws_router)
 
     frontend_dist = PROJECT_ROOT / "frontend" / "dist"
     if frontend_dist.exists():

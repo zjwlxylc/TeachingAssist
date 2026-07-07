@@ -65,7 +65,7 @@ def collect_targets(connection: sqlite3.Connection) -> dict[str, set[int]]:
         targets["classroom_sessions"] |= ids_for(connection, f"SELECT id FROM classroom_sessions WHERE course_id IN ({placeholders})", tuple(targets["courses"]))
     if targets["classes"]:
         placeholders = ",".join("?" for _ in targets["classes"])
-        targets["classroom_sessions"] |= ids_for(connection, f"SELECT id FROM classroom_sessions WHERE class_id IN ({placeholders})", tuple(targets["classes"]))
+        targets["classroom_sessions"] |= ids_for(connection, f"SELECT session_id FROM session_classes WHERE class_id IN ({placeholders})", tuple(targets["classes"]))
         targets["students"] |= ids_for(connection, f"SELECT id FROM students WHERE class_id IN ({placeholders})", tuple(targets["classes"]))
 
     targets["questions"] |= {int(row["id"]) for row in connection.execute("SELECT id, title, content FROM questions").fetchall() if looks_trial_name(row["title"]) or looks_trial_name(row["content"])}
@@ -117,14 +117,12 @@ def cleanup_orphan_links(connection: sqlite3.Connection) -> dict[str, int]:
     deleted: dict[str, int] = {}
     cursor = connection.execute(
         """
-        DELETE FROM course_students
-        WHERE course_id NOT IN (SELECT id FROM courses)
+        DELETE FROM session_classes
+        WHERE session_id NOT IN (SELECT id FROM classroom_sessions)
            OR class_id NOT IN (SELECT id FROM classes)
-           OR student_id NOT IN (SELECT id FROM students)
-           OR class_id != (SELECT class_id FROM students WHERE students.id = course_students.student_id)
         """
     )
-    deleted["course_students_orphans"] = int(cursor.rowcount if cursor.rowcount is not None else 0)
+    deleted["session_classes_orphans"] = int(cursor.rowcount if cursor.rowcount is not None else 0)
     cursor = connection.execute(
         """
         DELETE FROM course_classes
@@ -138,6 +136,7 @@ def cleanup_orphan_links(connection: sqlite3.Connection) -> dict[str, int]:
         DELETE FROM classes
         WHERE id NOT IN (SELECT class_id FROM students)
           AND id NOT IN (SELECT class_id FROM course_classes)
+          AND id NOT IN (SELECT class_id FROM session_classes)
         """
     )
     deleted["classes_orphans"] = int(cursor.rowcount if cursor.rowcount is not None else 0)

@@ -55,9 +55,17 @@ import {
   fetchInteractionSettings,
   publishStudentInteractionMessage
 } from "../api/interactions";
+import {
+  MessageCreated,
+  PrivateMessage,
+  fetchStudentThread,
+  messageSocketUrl,
+  sendStudentMessage
+} from "../api/messages";
 import { recordCachedReplay } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
+import { useStatusStore } from "../store/statusStore";
 
 type ClassroomMessage = AnnouncementMessage | QuestionPublishedMessage | InteractionMessageCreated | InteractionSettingsUpdated;
 
@@ -109,6 +117,10 @@ export function StudentPage() {
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
+  const [privateMessages, setPrivateMessages] = useState<PrivateMessage[]>([]);
+  const [privateContent, setPrivateContent] = useState("");
+  const privateSocketRef = useRef<TeachingAssistSocket | null>(null);
+  const lastPrivateMessageIdRef = useRef(0);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<number, boolean>>({});
@@ -235,6 +247,77 @@ export function StudentPage() {
       socket.close();
     };
   }, [currentSession?.id]);
+
+  useEffect(() => {
+    if (!studentId || !name) {
+      setPrivateMessages([]);
+      lastPrivateMessageIdRef.current = 0;
+      return undefined;
+    }
+    let disposed = false;
+    const mergePrivateMessages = (items: PrivateMessage[]) => {
+      items.forEach((item) => {
+        lastPrivateMessageIdRef.current = Math.max(lastPrivateMessageIdRef.current, item.id);
+      });
+      setPrivateMessages((current) => {
+        const next = new Map<number, PrivateMessage>();
+        [...items, ...current].forEach((item) => next.set(item.id, item));
+        return Array.from(next.values()).sort((a, b) => a.id - b.id);
+      });
+    };
+    const loadThread = async () => {
+      try {
+        const items = await fetchStudentThread(studentId, name);
+        if (!disposed) {
+          mergePrivateMessages(items);
+        }
+      } catch (err) {
+        if (!disposed) {
+          setError((err as Error).message);
+        }
+      }
+    };
+    loadThread();
+    const socket = new TeachingAssistSocket(
+      messageSocketUrl(undefined, studentId, name),
+      (event) => {
+        const payload = JSON.parse(event.data) as MessageCreated;
+        if (payload.type === "message.created" && payload.message.receiver_role === "student") {
+          mergePrivateMessages([payload.message]);
+          setMessage("老师回复了你的私信");
+        }
+      },
+      3000
+    );
+    privateSocketRef.current = socket;
+    socket.connect();
+    return () => {
+      disposed = true;
+      socket.close();
+      privateSocketRef.current = null;
+    };
+  }, [studentId, name]);
+
+  async function handleSendPrivateMessage() {
+    if (!studentId || !name) {
+      setError("请先填写学号和姓名");
+      return;
+    }
+    if (!privateContent.trim()) {
+      setError("私信内容不能为空");
+      return;
+    }
+    try {
+      await sendStudentMessage(studentId, name, privateContent);
+      setPrivateContent("");
+      setMessage("私信已发送");
+      const items = await fetchStudentThread(studentId, name);
+      setPrivateMessages(items);
+      lastPrivateMessageIdRef.current = items.reduce((max, item) => Math.max(max, item.id), 0);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
 
   async function loadActiveSessions() {
     try {
@@ -583,14 +666,19 @@ export function StudentPage() {
     );
   }
 
+  // 将学生身份信息同步到全局状态，供 AppLayout 标题栏展示
+  useEffect(() => {
+    useStatusStore.getState().setStudentInfo(studentId, name);
+  }, [studentId, name]);
+
+  useEffect(() => {
+    useStatusStore.getState().setStudentLoggedIn(Boolean(result));
+  }, [result]);
+
   return (
     <Stack spacing={3}>
-      <Box>
-        <Typography variant="h1">学生签到</Typography>
-        <Typography color="text.secondary" sx={{ mt: 0.75 }}>
-          输入课堂 ID、学号和姓名完成本次课堂签到。
-        </Typography>
-      </Box>
+      {/* 页面标题（状态信息已移至全局标题栏，见 AppLayout） */}
+      <Typography variant="h1">学生签到</Typography>
 
       {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
 
@@ -664,6 +752,65 @@ export function StudentPage() {
       <Card sx={{ maxWidth: 760 }}>
         <CardContent>
           <Stack spacing={1.5}>
+      <Card sx={{ maxWidth: 760 }}>
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Box>
+              <Typography variant="h2">私信老师</Typography>
+              <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                与老师的 1:1 私聊，仅你和老师可见。填写学号和姓名后即可收发，无需进入课堂。
+              </Typography>
+            </Box>
+            {privateMessages.map((item) => (
+              <Box
+                key={item.id}
+                sx={{ display: "flex", justifyContent: item.sender_role === "student" ? "flex-end" : "flex-start" }}
+              >
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    maxWidth: "80%",
+                    bgcolor: item.sender_role === "student" ? "primary.main" : "background.paper",
+                    color: item.sender_role === "student" ? "primary.contrastText" : "text.primary",
+                  }}
+                >
+                  <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+                  <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
+                    {item.sender_role === "teacher" ? "老师" : "我"} · {item.created_at}
+                  </Typography>
+                </Paper>
+              </Box>
+            ))}
+            {privateMessages.length === 0 && (
+              <Typography color="text.secondary">还没有私信，给老师发一条吧。</Typography>
+            )}
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+              <TextField
+                label="私信内容"
+                value={privateContent}
+                onChange={(event) => setPrivateContent(event.target.value)}
+                helperText={`${privateContent.length}/500`}
+                inputProps={{ maxLength: 500 }}
+                fullWidth
+              />
+              <Button
+                variant="contained"
+                startIcon={<SendIcon />}
+                onClick={handleSendPrivateMessage}
+                disabled={!studentId || !name}
+                sx={{ minWidth: 120 }}
+              >
+                发送
+              </Button>
+            </Stack>
+            {(!studentId || !name) && (
+              <Alert severity="info">请先在上方填写学号和姓名，即可与老师私信。</Alert>
+            )}
+          </Stack>
+        </CardContent>
+      </Card>
+
             <Typography variant="h2">课堂公告</Typography>
             {announcements.map((item) => (
               <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>

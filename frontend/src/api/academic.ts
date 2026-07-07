@@ -22,7 +22,6 @@ export interface ClassGroup {
 export interface ClassroomSession {
   id: number;
   course_id: number;
-  class_id: number;
   title: string;
   session_no: number;
   status: string;
@@ -31,6 +30,7 @@ export interface ClassroomSession {
   is_makeup: number;
   schedule_note: string | null;
   course_name?: string;
+  /** 逗号拼接的多个上课班级名称 */
   class_name?: string;
   roster_count?: number;
 }
@@ -56,6 +56,9 @@ export interface ImportJob {
   total_rows: number;
   standard_fields: Record<string, string>;
   required_fields: string[];
+  sheet_names?: string[];
+  active_sheet?: string;
+  selected_sheet?: string;
 }
 
 export interface ImportPreviewRow {
@@ -98,6 +101,13 @@ export function createClass(name: string) {
   });
 }
 
+export function updateClassName(classId: number, name: string) {
+  return request<ClassGroup>(`/academic/classes/${classId}`, {
+    method: "PUT",
+    body: JSON.stringify({ name })
+  });
+}
+
 export function linkCourseClass(courseId: number, classId: number) {
   return request<{ id: number; course_id: number; class_id: number }>("/academic/course-classes", {
     method: "POST",
@@ -112,7 +122,7 @@ export function fetchSessions(courseId?: number) {
 
 export function createSession(payload: {
   course_id: number;
-  class_id: number;
+  class_ids: number[];
   title: string;
   session_no: number;
   start_time?: string;
@@ -153,9 +163,10 @@ export function suggestStudentImportMapping(jobId: number) {
   });
 }
 
-export async function uploadStudentExcel(file: File) {
+export async function uploadStudentExcel(file: File, sheetName?: string) {
   const form = new FormData();
   form.append("file", file);
+  if (sheetName) form.append("sheet_name", sheetName);
   return request<ImportJob>("/academic/imports/excel", {
     method: "POST",
     headers: {},
@@ -172,7 +183,7 @@ export function previewStudentImport(jobId: number, mapping: Record<string, stri
 
 export function confirmStudentImport(
   jobId: number,
-  courseId: number,
+  classId: number,
   mapping: Record<string, string>,
   importValidOnly = true,
   duplicateStrategy: "overwrite" | "skip" | "merge" = "merge"
@@ -182,7 +193,7 @@ export function confirmStudentImport(
     {
       method: "POST",
       body: JSON.stringify({
-        course_id: courseId,
+        class_id: classId,
         mapping,
         import_valid_only: importValidOnly,
         duplicate_strategy: duplicateStrategy

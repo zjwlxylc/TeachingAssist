@@ -135,10 +135,10 @@ def _parse_time(value: str | None) -> datetime | None:
 def _load_session(connection: Any, session_id: int) -> dict[str, Any]:
     row = connection.execute(
         """
-        SELECT s.*, c.name AS course_name, cl.name AS class_name
+        SELECT s.*, c.name AS course_name,
+               (SELECT GROUP_CONCAT(cl.name) FROM session_classes sc JOIN classes cl ON cl.id = sc.class_id WHERE sc.session_id = s.id) AS class_name
         FROM classroom_sessions s
         JOIN courses c ON c.id = s.course_id
-        JOIN classes cl ON cl.id = s.class_id
         WHERE s.id = ?
         """,
         (session_id,),
@@ -152,11 +152,10 @@ def _roster_count(connection: Any, session: dict[str, Any]) -> int:
     row = connection.execute(
         """
         SELECT COUNT(*) AS total
-        FROM course_students cs
-        JOIN students s ON s.id = cs.student_id
-        WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+        FROM students s
+        WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
         """,
-        (session["course_id"], session["class_id"]),
+        (session["id"],),
     ).fetchone()
     return int(row["total"] if row else 0)
 
@@ -195,12 +194,11 @@ def _end_session_in_connection(connection: Any, session: dict[str, Any], ended_a
     connection.execute(
         """
         INSERT OR IGNORE INTO sign_in_records(session_id, student_id, status)
-        SELECT ?, cs.student_id, 'absent'
-        FROM course_students cs
-        JOIN students s ON s.id = cs.student_id
-        WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+        SELECT ?, s.id, 'absent'
+        FROM students s
+        WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
         """,
-        (session["id"], session["course_id"], session["class_id"]),
+        (session["id"], session["id"]),
     )
     connection.execute(
         """
@@ -297,15 +295,12 @@ def list_active_sessions() -> list[dict[str, Any]]:
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT s.*, c.name AS course_name, cl.name AS class_name,
-                   COUNT(st.id) AS roster_count
+            SELECT s.*, c.name AS course_name,
+                   (SELECT GROUP_CONCAT(cl.name) FROM session_classes sc JOIN classes cl ON cl.id = sc.class_id WHERE sc.session_id = s.id) AS class_name,
+                   (SELECT COUNT(*) FROM students st WHERE st.class_id IN (SELECT class_id FROM session_classes WHERE session_id = s.id) AND st.is_active = 1) AS roster_count
             FROM classroom_sessions s
             JOIN courses c ON c.id = s.course_id
-            JOIN classes cl ON cl.id = s.class_id
-            LEFT JOIN course_students cs ON cs.course_id = s.course_id AND cs.class_id = s.class_id
-            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
             WHERE s.status = 'active'
-            GROUP BY s.id
             ORDER BY COALESCE(s.actual_started_at, s.start_time, s.created_at) DESC, s.id DESC
             LIMIT 20
             """
@@ -338,13 +333,11 @@ def student_sign_in(
             """
             SELECT s.*
             FROM students s
-            JOIN course_students cs ON cs.student_id = s.id
             WHERE s.student_id = ?
-              AND cs.course_id = ?
-              AND cs.class_id = ?
+              AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?)
               AND s.is_active = 1
             """,
-            (student_number, session["course_id"], session["class_id"]),
+            (student_number, session["id"]),
         ).fetchone()
         if student is None:
             raise AppError("未找到该学号，或不在本课堂名单中", code="STUDENT_NOT_FOUND", status_code=404)
@@ -418,14 +411,13 @@ def get_sign_in_summary(session_id: int) -> dict[str, Any]:
             SELECT s.id AS student_pk, s.student_id AS student_number, s.name AS student_name,
                    cl.name AS class_name, r.id AS record_id, r.status, r.sign_time,
                    r.ip_address, r.user_agent
-            FROM course_students cs
-            JOIN students s ON s.id = cs.student_id
+            FROM students s
             JOIN classes cl ON cl.id = s.class_id
             LEFT JOIN sign_in_records r ON r.session_id = ? AND r.student_id = s.id
-            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+            WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
             ORDER BY s.student_id
             """,
-            (session_id, session["course_id"], session["class_id"]),
+            (session_id, session_id),
         ).fetchall()
 
     records = [_row_to_dict(row) for row in rows]
@@ -466,10 +458,9 @@ def update_sign_in_status(
             """
             SELECT s.*
             FROM students s
-            JOIN course_students cs ON cs.student_id = s.id
-            WHERE s.id = ? AND cs.course_id = ? AND cs.class_id = ?
+            WHERE s.id = ? AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?)
             """,
-            (student_pk, session["course_id"], session["class_id"]),
+            (student_pk, session["id"]),
         ).fetchone()
         if student is None:
             raise AppError("学生不在本课堂名单中", code="STUDENT_NOT_IN_SESSION", status_code=404)

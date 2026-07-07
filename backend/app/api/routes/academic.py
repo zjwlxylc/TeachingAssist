@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
@@ -18,6 +18,10 @@ class ClassRequest(BaseModel):
     name: str = Field(min_length=1)
 
 
+class UpdateClassRequest(BaseModel):
+    name: str = Field(min_length=1)
+
+
 class CourseClassRequest(BaseModel):
     course_id: int
     class_id: int
@@ -25,7 +29,7 @@ class CourseClassRequest(BaseModel):
 
 class SessionRequest(BaseModel):
     course_id: int
-    class_id: int
+    class_ids: list[int]
     title: str = Field(min_length=1)
     session_no: int = Field(gt=0)
     start_time: str | None = None
@@ -39,7 +43,7 @@ class ImportMappingRequest(BaseModel):
 
 
 class ConfirmImportRequest(BaseModel):
-    course_id: int
+    class_id: int
     mapping: dict[str, str]
     import_valid_only: bool = True
     duplicate_strategy: str = "merge"
@@ -77,6 +81,15 @@ def create_class(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     return ok(academic_service.create_class(payload.name), message="班级已创建")
+
+
+@router.put("/classes/{class_id}", response_model=ApiResponse[dict[str, object]])
+def update_class(
+    class_id: int,
+    payload: UpdateClassRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(academic_service.update_class(class_id, payload.name), message="班级已重命名")
 
 
 @router.post("/course-classes", response_model=ApiResponse[dict[str, object]])
@@ -128,11 +141,14 @@ def set_student_active(
 @router.post("/imports/excel", response_model=ApiResponse[dict[str, object]])
 async def upload_excel(
     file: UploadFile = File(...),
+    sheet_name: str | None = Form(None),
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     content = await file.read()
     return ok(
-        academic_service.parse_excel_upload(file.filename or "students.xlsx", len(content), content),
+        academic_service.parse_excel_upload(
+            file.filename or "students.xlsx", len(content), content, sheet_name
+        ),
         message="Excel 已解析",
     )
 
@@ -176,7 +192,7 @@ def confirm_import(
     return ok(
         academic_service.confirm_import(
             job_id,
-            payload.course_id,
+            payload.class_id,
             payload.mapping,
             payload.import_valid_only,
             payload.duplicate_strategy,

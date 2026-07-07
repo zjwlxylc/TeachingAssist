@@ -136,14 +136,12 @@ async def publish_student_message(session_id: int, student_number: str, name: st
             """
             SELECT s.*
             FROM students s
-            JOIN course_students cs ON cs.student_id = s.id
             WHERE s.student_id = ?
               AND s.name = ?
-              AND cs.course_id = ?
-              AND cs.class_id = ?
+              AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?)
               AND s.is_active = 1
             """,
-            (student_number.strip(), name.strip(), session["course_id"], session["class_id"]),
+            (student_number.strip(), name.strip(), session["id"]),
         ).fetchone()
         if student is None:
             raise AppError("未找到该学号，或姓名不匹配", code="STUDENT_NOT_FOUND", status_code=404)

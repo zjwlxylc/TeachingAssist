@@ -101,12 +101,11 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
         students = connection.execute(
             """
             SELECT s.id, s.student_id, s.name
-            FROM course_students cs
-            JOIN students s ON s.id = cs.student_id
-            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+            FROM students s
+            WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
             ORDER BY s.student_id
             """,
-            (session["course_id"], session["class_id"]),
+            (session["id"],),
         ).fetchall()
         student_evals: list[dict[str, Any]] = []
         for row in students:
@@ -334,10 +333,9 @@ def get_student_feedback(session_id: int, student_number: str, name: str) -> dic
             """
             SELECT s.*
             FROM students s
-            JOIN course_students cs ON cs.student_id = s.id
-            WHERE s.student_id = ? AND s.name = ? AND cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+            WHERE s.student_id = ? AND s.name = ? AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
             """,
-            (student_number.strip(), name.strip(), session["course_id"], session["class_id"]),
+            (student_number.strip(), name.strip(), session["id"]),
         ).fetchone()
         if student is None:
             raise AppError("未找到该学号，或姓名不匹配", code="STUDENT_NOT_FOUND", status_code=404)

@@ -23,7 +23,9 @@ STANDARD_FIELDS = {
     "college": "学院",
     "grade": "年级",
 }
-REQUIRED_FIELDS = {"student_id", "name", "class_name"}
+# 学号与姓名为必填；班级不强制要求映射到 Excel 列——
+# 实际写入以导入时选择的「导入目标班级」(class_id) 为准，Excel 班级列仅作预览参考。
+REQUIRED_FIELDS = {"student_id", "name"}
 MAX_NAME_LENGTH = 100
 
 
@@ -87,8 +89,7 @@ def list_courses() -> list[dict[str, Any]]:
                    COUNT(DISTINCT st.id) AS student_count
             FROM courses c
             LEFT JOIN course_classes cc ON cc.course_id = c.id
-            LEFT JOIN course_students cs ON cs.course_id = c.id
-            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
+            LEFT JOIN students st ON st.class_id = cc.class_id AND st.is_active = 1
             GROUP BY c.id
             ORDER BY c.updated_at DESC, c.id DESC
             """
@@ -153,6 +154,25 @@ def create_class(name: str) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
+def update_class(class_id: int, name: str) -> dict[str, Any]:
+    name = _validate_display_name(name, "班级名称", "CLASS_NAME")
+    with get_connection() as connection:
+        klass = connection.execute("SELECT id FROM classes WHERE id = ?", (class_id,)).fetchone()
+        if klass is None:
+            raise AppError("班级不存在", code="CLASS_NOT_FOUND", status_code=404)
+        dup = connection.execute(
+            "SELECT id FROM classes WHERE name = ? AND id != ?", (name, class_id)
+        ).fetchone()
+        if dup is not None:
+            raise AppError("班级名称已存在", code="CLASS_NAME_DUPLICATE", status_code=409)
+        connection.execute(
+            "UPDATE classes SET name = ?, updated_at = datetime('now') WHERE id = ?",
+            (name, class_id),
+        )
+        row = connection.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
+    return _row_to_dict(row)
+
+
 def link_course_class(course_id: int, class_id: int) -> dict[str, Any]:
     with get_connection() as connection:
         course = connection.execute("SELECT id FROM courses WHERE id = ?", (course_id,)).fetchone()
@@ -190,13 +210,11 @@ def list_sessions(course_id: int | None = None) -> list[dict[str, Any]]:
     with get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT s.*, c.name AS course_name, cl.name AS class_name,
-                   COUNT(st.id) AS roster_count
+            SELECT s.*, c.name AS course_name,
+                   (SELECT GROUP_CONCAT(cl.name) FROM session_classes sc JOIN classes cl ON cl.id = sc.class_id WHERE sc.session_id = s.id) AS class_name,
+                   (SELECT COUNT(*) FROM students st WHERE st.class_id IN (SELECT class_id FROM session_classes WHERE session_id = s.id) AND st.is_active = 1) AS roster_count
             FROM classroom_sessions s
             JOIN courses c ON c.id = s.course_id
-            JOIN classes cl ON cl.id = s.class_id
-            LEFT JOIN course_students cs ON cs.course_id = s.course_id AND cs.class_id = s.class_id
-            LEFT JOIN students st ON st.id = cs.student_id AND st.is_active = 1
             {where}
             GROUP BY s.id
             ORDER BY COALESCE(s.start_time, s.created_at) DESC, s.id DESC
@@ -208,31 +226,33 @@ def list_sessions(course_id: int | None = None) -> list[dict[str, Any]]:
 
 def create_session(payload: dict[str, Any]) -> dict[str, Any]:
     course_id = int(payload["course_id"])
-    class_id = int(payload["class_id"])
+    class_ids = [int(x) for x in payload["class_ids"]]
+    if not class_ids:
+        raise AppError("请至少选择一个上课班级", code="SESSION_NO_CLASS")
     title = _validate_display_name(str(payload["title"]), "课堂标题", "SESSION_TITLE")
     session_no = int(payload["session_no"])
     if session_no <= 0:
         raise AppError("课次必须大于 0", code="SESSION_NO_INVALID")
 
     with get_connection() as connection:
-        linked = connection.execute(
-            "SELECT id FROM course_classes WHERE course_id = ? AND class_id = ?",
-            (course_id, class_id),
-        ).fetchone()
-        if linked is None:
-            raise AppError("请先关联课程和班级", code="COURSE_CLASS_NOT_LINKED")
+        for cid in class_ids:
+            linked = connection.execute(
+                "SELECT id FROM course_classes WHERE course_id = ? AND class_id = ?",
+                (course_id, cid),
+            ).fetchone()
+            if linked is None:
+                raise AppError("请先关联课程和班级", code="COURSE_CLASS_NOT_LINKED")
         try:
             cursor = connection.execute(
                 """
                 INSERT INTO classroom_sessions(
-                    course_id, class_id, title, session_no, start_time, end_time,
+                    course_id, title, session_no, start_time, end_time,
                     is_makeup, schedule_note
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     course_id,
-                    class_id,
                     title,
                     session_no,
                     payload.get("start_time"),
@@ -243,13 +263,21 @@ def create_session(payload: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as exc:
             if "UNIQUE" in str(exc):
-                raise AppError("同一课程班级下课次已存在", code="SESSION_NO_EXISTS") from exc
+                raise AppError("同一课程下课次已存在", code="SESSION_NO_EXISTS") from exc
             raise
-        row = connection.execute("SELECT * FROM classroom_sessions WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        session_id = cursor.lastrowid
+        for cid in class_ids:
+            connection.execute(
+                "INSERT OR IGNORE INTO session_classes(session_id, class_id) VALUES (?, ?)",
+                (session_id, cid),
+            )
+        row = connection.execute("SELECT * FROM classroom_sessions WHERE id = ?", (session_id,)).fetchone()
     return _row_to_dict(row)
 
 
-def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[str, Any]:
+def parse_excel_upload(
+    file_name: str, file_size: int, content: bytes, sheet_name: str | None = None
+) -> dict[str, Any]:
     suffix = Path(file_name).suffix.lower()
     if suffix not in {".xls", ".xlsx"}:
         raise AppError("仅支持 .xls/.xlsx 格式", code="EXCEL_FORMAT_UNSUPPORTED")
@@ -260,7 +288,13 @@ def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[s
 
     workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
     try:
-        worksheet = workbook.active
+        sheet_names = workbook.sheetnames
+        active_sheet = workbook.active.title
+        # 优先使用用户指定的工作表；否则回退到活动表
+        if sheet_name and sheet_name in sheet_names:
+            worksheet = workbook[sheet_name]
+        else:
+            worksheet = workbook.active
         rows = list(worksheet.iter_rows(values_only=True))
     finally:
         workbook.close()
@@ -319,6 +353,9 @@ def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[s
         "total_rows": len(data_rows),
         "standard_fields": STANDARD_FIELDS,
         "required_fields": sorted(REQUIRED_FIELDS),
+        "sheet_names": sheet_names,
+        "active_sheet": active_sheet,
+        "selected_sheet": worksheet.title if sheet_name and sheet_name in sheet_names else active_sheet,
     }
 
 
@@ -456,8 +493,6 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
             row_errors.append("学号为空")
         if not normalized.get("name"):
             row_errors.append("姓名为空")
-        if not normalized.get("class_name"):
-            row_errors.append("班级为空")
         for field in ("name", "class_name"):
             if _looks_corrupted_text(normalized.get(field, "")):
                 row_errors.append(f"{STANDARD_FIELDS[field]}疑似乱码")
@@ -494,11 +529,16 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
 
 def confirm_import(
     job_id: int,
-    course_id: int,
+    class_id: int,
     mapping: dict[str, str],
     import_valid_only: bool = True,
     duplicate_strategy: str = "merge",
 ) -> dict[str, Any]:
+    """按班级导入学生。学生归属班级（class_id），不再写入课程级 course_students。
+
+    导入目标班级必须已存在（由班级管理模块创建）。Excel 中的“班级”列仅用于预览，
+    实际写入以传入的 class_id 为准。
+    """
     if duplicate_strategy not in {"overwrite", "skip", "merge"}:
         raise AppError("重复学号处理策略不支持", code="IMPORT_DUPLICATE_STRATEGY_INVALID")
     job = _load_import_job(job_id)
@@ -512,9 +552,9 @@ def confirm_import(
     failed = 0
     report_rows: list[dict[str, Any]] = []
     with get_connection() as connection:
-        course = connection.execute("SELECT id FROM courses WHERE id = ?", (course_id,)).fetchone()
-        if course is None:
-            raise AppError("课程不存在", code="COURSE_NOT_FOUND", status_code=404)
+        klass = connection.execute("SELECT id FROM classes WHERE id = ?", (class_id,)).fetchone()
+        if klass is None:
+            raise AppError("班级不存在", code="CLASS_NOT_FOUND", status_code=404)
 
         for row in preview["all_rows"]:
             if not row["valid"]:
@@ -529,20 +569,6 @@ def confirm_import(
                 continue
             data = row["data"]
             try:
-                connection.execute(
-                    """
-                    INSERT INTO classes(name)
-                    VALUES (?)
-                    ON CONFLICT(name) DO UPDATE SET updated_at = datetime('now')
-                    """,
-                    (data["class_name"],),
-                )
-                class_row = connection.execute("SELECT id FROM classes WHERE name = ?", (data["class_name"],)).fetchone()
-                class_id = int(class_row["id"])
-                connection.execute(
-                    "INSERT OR IGNORE INTO course_classes(course_id, class_id) VALUES (?, ?)",
-                    (course_id, class_id),
-                )
                 existing_student = connection.execute(
                     "SELECT * FROM students WHERE student_id = ?",
                     (data["student_id"],),
@@ -600,19 +626,6 @@ def confirm_import(
                         updated += 1
                     else:
                         imported += 1
-                student = connection.execute(
-                    "SELECT id FROM students WHERE student_id = ?",
-                    (data["student_id"],),
-                ).fetchone()
-                connection.execute(
-                    """
-                    INSERT INTO course_students(course_id, class_id, student_id)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(course_id, student_id) DO UPDATE SET
-                        class_id = excluded.class_id
-                    """,
-                    (course_id, class_id, int(student["id"])),
-                )
             except Exception:
                 failed += 1
                 report_rows.append(
@@ -646,8 +659,8 @@ def list_students(course_id: int | None = None, class_id: int | None = None, inc
     joins = ""
     where = ["1 = 1"] if include_inactive else ["s.is_active = 1"]
     if course_id:
-        joins = "JOIN course_students cs ON cs.student_id = s.id"
-        where.append("cs.course_id = ?")
+        joins = "JOIN course_classes cc ON cc.class_id = s.class_id"
+        where.append("cc.course_id = ?")
         params.append(course_id)
     if class_id:
         where.append("s.class_id = ?")

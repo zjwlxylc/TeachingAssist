@@ -64,11 +64,11 @@ def _homework_upload_root(homework_id: int, submission_id: int | None = None) ->
 def _load_homework(connection: Any, homework_id: int) -> dict[str, Any]:
     row = connection.execute(
         """
-        SELECT h.*, s.title AS session_title, c.name AS course_name, cl.name AS class_name
+        SELECT h.*, s.title AS session_title, c.name AS course_name,
+               (SELECT GROUP_CONCAT(cl.name) FROM session_classes sc JOIN classes cl ON cl.id = sc.class_id WHERE sc.session_id = s.id) AS class_name
         FROM homework h
         JOIN classroom_sessions s ON s.id = h.session_id
         JOIN courses c ON c.id = s.course_id
-        JOIN classes cl ON cl.id = s.class_id
         WHERE h.id = ?
         """,
         (homework_id,),
@@ -225,13 +225,11 @@ def _resolve_student(connection: Any, session: dict[str, Any], student_number: s
         """
         SELECT s.*
         FROM students s
-        JOIN course_students cs ON cs.student_id = s.id
         WHERE s.student_id = ?
-          AND cs.course_id = ?
-          AND cs.class_id = ?
+          AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?)
           AND s.is_active = 1
         """,
-        (student_number.strip(), session["course_id"], session["class_id"]),
+        (student_number.strip(), session["id"]),
     ).fetchone()
     if row is None:
         raise AppError("未找到该学号，或不在本课堂名单中", code="STUDENT_NOT_FOUND", status_code=404)
@@ -391,14 +389,13 @@ def get_submission_summary(homework_id: int) -> dict[str, Any]:
                    hs.submit_version, hs.submitted_at, hs.created_at,
                    hs.ai_score, hs.ai_feedback_json, hs.ai_confidence,
                    hs.final_score, hs.final_feedback, hs.grade_published_at
-            FROM course_students cs
-            JOIN students s ON s.id = cs.student_id
+            FROM students s
             LEFT JOIN homework_submissions hs
               ON hs.homework_id = ? AND hs.student_id = s.id AND hs.is_latest = 1
-            WHERE cs.course_id = ? AND cs.class_id = ? AND s.is_active = 1
+            WHERE s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
             ORDER BY s.student_id
             """,
-            (homework_id, session["course_id"], session["class_id"]),
+            (homework_id, session["id"]),
         ).fetchall()
         records = [_row_to_dict(row) for row in rows]
         for record in records:

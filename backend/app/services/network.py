@@ -1,3 +1,4 @@
+import os
 import socket
 import subprocess
 from dataclasses import asdict, dataclass
@@ -53,6 +54,14 @@ def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
 
 
 def choose_access_port() -> dict[str, object]:
+    # 若服务已由 run.py 在启动时选定实际监听端口（通过环境变量传递），
+    # 则直接返回该端口，避免运行期重复探测把本服务已占用的端口误判为不可用，
+    # 从而 fallback 到错误端口（如 8888），导致生成的访问地址学生无法访问。
+    actual_port = os.environ.get("TEACHING_ASSIST_ACTUAL_PORT")
+    if actual_port and actual_port.isdigit():
+        port = int(actual_port)
+        settings = get_settings()
+        return {"port": port, "available": True, "fallback_used": port != settings.server.port}
     settings = get_settings()
     for port in [settings.server.port, *settings.server.fallback_ports]:
         if is_port_available(port):

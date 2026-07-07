@@ -1,3 +1,4 @@
+import os
 import socket
 
 import uvicorn
@@ -23,9 +24,13 @@ def choose_port() -> int:
 
 if __name__ == "__main__":
     settings = get_settings()
+    port = choose_port()
+    # 把本次实际选定的监听端口告知应用，供运行期生成访问地址时使用，
+    # 避免运行期重复探测端口时把本服务已占用的端口误判为不可用而 fallback 到错误端口。
+    os.environ["TEACHING_ASSIST_ACTUAL_PORT"] = str(port)
     uvicorn.run(
         "app.main:app",
         host=settings.server.host,
-        port=choose_port(),
+        port=port,
         reload=settings.environment == "development",
     )

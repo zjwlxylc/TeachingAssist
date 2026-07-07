@@ -19,6 +19,9 @@ import PersonIcon from "@mui/icons-material/Person";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import StarIcon from "@mui/icons-material/Star";
 
+import { useAuthStore } from "../store/authStore";
+import { useStatusStore } from "../store/statusStore";
+
 const GITHUB_REPO_URL = "https://github.com/zjwlxylc/TeachingAssist";
 
 const navItems = [
@@ -30,6 +33,35 @@ export function AppLayout({ children }: PropsWithChildren) {
   const location = useLocation();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
+
+  const { isAuthenticated } = useAuthStore();
+  const {
+    teacherHealthStatus,
+    teacherDbIntegrity,
+    teacherAccessUrl,
+    studentId,
+    studentName,
+    studentLoggedIn,
+  } = useStatusStore();
+
+  const isTeacherRoute = location.pathname.startsWith("/teacher");
+  const isStudentRoute = location.pathname.startsWith("/student");
+
+  const statusItems: { label: string; value: string; color: string }[] = isTeacherRoute
+    ? [
+        { label: "教师工作台", value: teacherHealthStatus ? "运行中" : "检测中", color: teacherHealthStatus ? "success.main" : "text.disabled" },
+        { label: "系统管理", value: teacherHealthStatus ? "正常" : "检测中", color: teacherHealthStatus ? "success.main" : "text.disabled" },
+        { label: "教师认证", value: isAuthenticated ? "已认证" : "未认证", color: isAuthenticated ? "success.main" : "warning.main" },
+        { label: "学生访问地址", value: teacherAccessUrl || "待配置", color: teacherAccessUrl ? "success.main" : "warning.main" },
+        { label: "数据库备份", value: teacherDbIntegrity === "ok" ? "正常" : (teacherDbIntegrity || "检测中"), color: teacherDbIntegrity === "ok" ? "success.main" : (teacherDbIntegrity ? "warning.main" : "text.disabled") },
+      ]
+    : isStudentRoute
+    ? [
+        { label: "学号", value: studentId || "未填写", color: studentId ? "success.main" : "text.disabled" },
+        { label: "姓名", value: studentName || "未填写", color: studentName ? "success.main" : "text.disabled" },
+        { label: "登录状态", value: studentLoggedIn ? "已登录" : "未登录", color: studentLoggedIn ? "success.main" : "warning.main" },
+      ]
+    : [];
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
@@ -47,15 +79,40 @@ export function AppLayout({ children }: PropsWithChildren) {
             variant="h2"
             component="div"
             sx={{
-              flexGrow: 1,
               fontSize: { xs: "0.95rem", sm: "1.25rem" },
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
             }}
           >
-            {isMobile ? "教学辅助" : "大学教学过程辅助软件"}
+            AI课堂辅助
           </Typography>
+          {!isMobile && statusItems.length > 0 && (
+            <Stack
+              direction="row"
+              spacing={{ xs: 0.5, sm: 1.5 }}
+              sx={{ ml: { xs: 0.5, sm: 2 }, overflow: "hidden" }}
+            >
+              {statusItems.map((item) => (
+                <Box
+                  key={item.label}
+                  sx={{ display: "flex", alignItems: "center", gap: 0.4, whiteSpace: "nowrap" }}
+                >
+                  <Box
+                    component="span"
+                    sx={{ width: 7, height: 7, borderRadius: "50%", bgcolor: item.color, flexShrink: 0 }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.4 }}>
+                    {item.label}
+                  </Typography>
+                  <Typography variant="caption" fontWeight={600} sx={{ lineHeight: 1.4 }}>
+                    {item.value}
+                  </Typography>
+                </Box>
+              ))}
+            </Stack>
+          )}
+          <Box sx={{ flexGrow: 1 }} />
           <Stack direction="row" spacing={{ xs: 0.25, sm: 1 }}>
             {navItems.map((item) => (
               <Button
@@ -89,9 +146,25 @@ export function AppLayout({ children }: PropsWithChildren) {
         }}
       >
         <Tooltip
-          title="前往 GitHub 为我们点亮 ⭐ Star，您的支持是开源持续前进的动力。"
+          title={
+            <>
+              开源项目开发者：李超（浙江万里学院）。
+              <br />
+              前往 GitHub 为我们点亮 ⭐ Star，您的支持是开源持续前进的动力。
+            </>
+          }
           placement="left"
           arrow
+          componentsProps={{
+            tooltip: {
+              sx: {
+                fontSize: "0.9rem",
+                maxWidth: 360,
+                whiteSpace: "normal",
+                lineHeight: 1.5,
+              },
+            },
+          }}
         >
           <Card
             component="a"
