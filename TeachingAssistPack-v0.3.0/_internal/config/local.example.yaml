@@ -1,0 +1,8 @@
+server:
+  port: 8080
+
+storage:
+  # 开发时可改为项目内目录，例如 D:/教学辅助项目/.local
+  local_root: C:/TeachingAssist
+  # removable_root 可指定 U 盘根目录，例如 E:/
+  removable_root:

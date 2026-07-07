@@ -12,6 +12,7 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 class StudentSignInRequest(BaseModel):
     student_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    device_hash: str | None = None
 
 
 class SignInStatusRequest(BaseModel):
@@ -55,7 +56,14 @@ def student_sign_in(
     ip_address = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
     return ok(
-        classroom_service.student_sign_in(session_id, payload.student_id, payload.name, ip_address, user_agent),
+        classroom_service.student_sign_in(
+            session_id,
+            payload.student_id,
+            payload.name,
+            ip_address,
+            user_agent,
+            payload.device_hash,
+        ),
         message="签到成功",
     )
 
@@ -104,4 +112,32 @@ def export_sign_ins(
         content=exported["content"],
         media_type=exported["content_type"],
         headers={"Content-Disposition": f"attachment; filename={exported['file_name']}"},
+    )
+
+
+class ReviewAlertRequest(BaseModel):
+    notes: str | None = None
+
+
+@router.get("/sessions/{session_id}/device-alerts", response_model=ApiResponse[list[dict[str, object]]])
+def get_device_alerts(
+    session_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[list[dict[str, object]]]:
+    return ok(classroom_service.get_device_sharing_alerts(session_id))
+
+
+@router.put("/device-alerts/{alert_id}/review", response_model=ApiResponse[dict[str, object]])
+def review_device_alert(
+    alert_id: int,
+    payload: ReviewAlertRequest,
+    teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(
+        classroom_service.review_device_alert(
+            alert_id,
+            str(teacher.get("name") or "教师"),
+            payload.notes,
+        ),
+        message="警告已审核",
     )

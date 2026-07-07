@@ -18,16 +18,28 @@ export function setAuthToken(token: string | null) {
   }
 }
 
+/**
+ * Dispatched when a request receives 401 UNAUTHORIZED.
+ * Components can listen for this event to redirect to login.
+ */
+export const AUTH_EXPIRED_EVENT = "auth:expired";
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
     headers: {
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(init?.headers ?? {})
-    },
-    ...init
+    }
   });
+
+  // Handle 401 / session expired: clear stale token and notify UI
+  if (response.status === 401) {
+    setAuthToken(null);
+    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+  }
 
   const payload = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !payload.success) {

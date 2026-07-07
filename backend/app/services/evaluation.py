@@ -85,6 +85,8 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
     if version_type not in {"temporary", "final"}:
         raise AppError("评估版本类型不支持", code="EVALUATION_VERSION_INVALID")
     session = get_session_public(session_id)
+
+    # Phase 1: Read all student data and compute scores (read-only, no AI calls)
     with get_connection() as connection:
         weights = _load_weights(connection)
         version = connection.execute(
@@ -106,6 +108,7 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
             """,
             (session["course_id"], session["class_id"]),
         ).fetchall()
+        student_evals: list[dict[str, Any]] = []
         for row in students:
             student = _row_to_dict(row)
             sign_in = connection.execute(
@@ -113,7 +116,7 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
                 (session_id, student["id"]),
             ).fetchone()
             status = sign_in["status"] if sign_in else None
-            attendance_score = 100 if status == "normal" else 80 if status == "late" else 0
+            attendance_score = 100 if status == "normal" else 80 if status == "late" else 60 if status == "leave" else 0
 
             question_row = connection.execute(
                 """
@@ -158,8 +161,8 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
             message_row = connection.execute(
                 """
                 SELECT COUNT(*) AS total
-                FROM question_action_logs
-                WHERE session_id = ? AND student_id = ?
+                FROM classroom_interaction_messages
+                WHERE session_id = ? AND sender_student_id = ? AND is_deleted = 0
                 """,
                 (session_id, student["id"]),
             ).fetchone()
@@ -174,8 +177,10 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
                 + message_score * float(weights["message_weight"])
                 + activity_score * float(weights["activity_weight"])
             ) / 100
-            warnings = []
-            if attendance_score == 0:
+            warnings: list[str] = []
+            if status == "leave":
+                warnings.append("请假")
+            elif attendance_score == 0:
                 warnings.append("缺勤")
                 total_score = min(total_score, 59)
             if total_questions and answered == 0:
@@ -184,23 +189,49 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
                 warnings.append("未交作业")
             level = _level(total_score)
             advice = _template_advice(level, warnings)
-            try:
-                if ai_service.is_ai_available():
-                    generated = ai_service.generate_structured_json(
-                        "learning_advice",
-                        f"为学生生成 80 字以内学习建议，返回 JSON {{\"advice\":\"...\"}}。等级：{level}，预警：{warnings}",
-                        source_type="learning_evaluation",
-                        source_id=session_id,
-                    )
-                    advice = str(generated.get("advice") or advice)
-            except Exception as exc:
-                ai_service.record_failure_task(
+            student_evals.append(
+                {
+                    "student": student,
+                    "status": status,
+                    "total_questions": total_questions,
+                    "answered": answered,
+                    "total_homework": total_homework,
+                    "submitted_homework": submitted_homework,
+                    "attendance_score": attendance_score,
+                    "question_score": question_score,
+                    "homework_score": homework_score,
+                    "message_score": message_score,
+                    "activity_score": activity_score,
+                    "total_score": total_score,
+                    "level": level,
+                    "advice": advice,
+                    "warnings": warnings,
+                }
+            )
+
+    # Phase 2: Generate AI advice outside DB transaction to avoid write-lock conflicts
+    for item in student_evals:
+        try:
+            if ai_service.is_ai_available():
+                generated = ai_service.generate_structured_json(
                     "learning_advice",
-                    "learning_evaluation",
-                    session_id,
-                    str(exc),
-                    {"student_id": student["student_id"], "level": level},
+                    f"为学生生成 80 字以内学习建议，返回 JSON {{\"advice\":\"...\"}}。等级：{item['level']}，预警：{item['warnings']}",
+                    source_type="learning_evaluation",
+                    source_id=session_id,
                 )
+                item["advice"] = str(generated.get("advice") or item["advice"])
+        except Exception as exc:
+            ai_service.record_failure_task(
+                "learning_advice",
+                "learning_evaluation",
+                session_id,
+                str(exc),
+                {"student_id": item["student"]["student_id"], "level": item["level"]},
+            )
+
+    # Phase 3: Write all evaluations in a single transaction
+    with get_connection() as connection:
+        for item in student_evals:
             connection.execute(
                 """
                 INSERT INTO learning_evaluations(
@@ -212,25 +243,25 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
                 """,
                 (
                     session_id,
-                    student["id"],
+                    item["student"]["id"],
                     version_type,
                     version_no,
-                    round(attendance_score, 2),
-                    round(question_score, 2),
-                    round(homework_score, 2),
-                    round(message_score, 2),
-                    round(activity_score, 2),
-                    round(total_score, 2),
-                    level,
-                    advice,
-                    json.dumps(warnings, ensure_ascii=False),
+                    round(item["attendance_score"], 2),
+                    round(item["question_score"], 2),
+                    round(item["homework_score"], 2),
+                    round(item["message_score"], 2),
+                    round(item["activity_score"], 2),
+                    round(item["total_score"], 2),
+                    item["level"],
+                    item["advice"],
+                    json.dumps(item["warnings"], ensure_ascii=False),
                     json.dumps(
                         {
-                            "sign_in_status": status,
-                            "total_questions": total_questions,
-                            "answered_questions": answered,
-                            "total_homework": total_homework,
-                            "submitted_homework": submitted_homework,
+                            "sign_in_status": item["status"],
+                            "total_questions": item["total_questions"],
+                            "answered_questions": item["answered"],
+                            "total_homework": item["total_homework"],
+                            "submitted_homework": item["submitted_homework"],
                         },
                         ensure_ascii=False,
                     ),

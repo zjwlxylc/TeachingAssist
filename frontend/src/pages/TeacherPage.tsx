@@ -45,6 +45,7 @@ import PsychologyIcon from "@mui/icons-material/Psychology";
 import AssessmentIcon from "@mui/icons-material/Assessment";
 import DownloadIcon from "@mui/icons-material/Download";
 import RestoreIcon from "@mui/icons-material/Restore";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
 import {
   ClassGroup,
@@ -88,10 +89,13 @@ import {
 } from "../api/announcements";
 import {
   SignInSummary,
+  DeviceSharingAlert,
   downloadSignIns,
   endClassroomSession,
+  fetchDeviceAlerts,
   fetchSignInLogs,
   fetchSignInSummary,
+  reviewDeviceAlert,
   startClassroomSession,
   updateSignInStatus
 } from "../api/classroom";
@@ -142,6 +146,14 @@ import {
   updateEvaluationWeights
 } from "../api/evaluation";
 import {
+  InteractionMessage,
+  InteractionSettings,
+  fetchInteractionMessages,
+  fetchInteractionSettings,
+  publishTeacherInteractionMessage,
+  updateInteractionSettings
+} from "../api/interactions";
+import {
   applyRecoveryAction,
   fetchRecoveryEvents,
   recordInterruption
@@ -163,6 +175,38 @@ const DEFAULT_OPTIONS: QuestionOption[] = [
   { option_key: "C", content: "", is_correct: false },
   { option_key: "D", content: "", is_correct: false }
 ];
+
+const SIGN_IN_STATUS_LABELS: Record<string, string> = {
+  normal: "正常",
+  late: "迟到",
+  absent: "缺勤",
+  leave: "请假"
+};
+
+const EVALUATION_WEIGHT_FIELDS = [
+  { key: "attendance_weight", label: "签到权重" },
+  { key: "question_weight", label: "问答权重" },
+  { key: "homework_weight", label: "作业权重" },
+  { key: "message_weight", label: "课堂互动权重" },
+  { key: "activity_weight", label: "课堂活动权重" }
+] as const;
+
+type EvaluationWeightKey = (typeof EVALUATION_WEIGHT_FIELDS)[number]["key"];
+type EvaluationWeights = Record<EvaluationWeightKey, number | string>;
+
+const DEFAULT_EVALUATION_WEIGHTS: EvaluationWeights = {
+  attendance_weight: 20,
+  question_weight: 35,
+  homework_weight: 25,
+  message_weight: 10,
+  activity_weight: 10
+};
+
+function pickEvaluationWeights(weights: Record<string, number | string>): EvaluationWeights {
+  return Object.fromEntries(
+    EVALUATION_WEIGHT_FIELDS.map((field) => [field.key, weights[field.key] ?? DEFAULT_EVALUATION_WEIGHTS[field.key]])
+  ) as EvaluationWeights;
+}
 
 export function TeacherPage() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -186,16 +230,21 @@ export function TeacherPage() {
   const [sessionEnd, setSessionEnd] = useState("");
   const [isMakeup, setIsMakeup] = useState(false);
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
-  const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
+  const [fieldMapping, setFieldMapping] = useState<Record<number, string>>({});
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [duplicateStrategy, setDuplicateStrategy] = useState<"merge" | "overwrite" | "skip">("merge");
   const [showInactiveStudents, setShowInactiveStudents] = useState(false);
   const [signInSummary, setSignInSummary] = useState<SignInSummary | null>(null);
   const [signInLogs, setSignInLogs] = useState<Array<Record<string, unknown>>>([]);
   const [signInReason, setSignInReason] = useState("教师手动调整");
+  const [deviceAlerts, setDeviceAlerts] = useState<DeviceSharingAlert[]>([]);
   const [announcementSessionId, setAnnouncementSessionId] = useState<number | "">("");
   const [announcementContent, setAnnouncementContent] = useState("");
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [interactionSessionId, setInteractionSessionId] = useState<number | "">("");
+  const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
+  const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
+  const [interactionContent, setInteractionContent] = useState("");
   const [questionSessionId, setQuestionSessionId] = useState<number | "">("");
   const [questionTitle, setQuestionTitle] = useState("");
   const [questionContent, setQuestionContent] = useState("");
@@ -223,13 +272,7 @@ export function TeacherPage() {
   const [reviewFeedback, setReviewFeedback] = useState<Record<number, string>>({});
   const [evaluationSessionId, setEvaluationSessionId] = useState<number | "">("");
   const [evaluationReport, setEvaluationReport] = useState<EvaluationReport | null>(null);
-  const [evaluationWeights, setEvaluationWeights] = useState<Record<string, number | string>>({
-    attendance_weight: 20,
-    question_weight: 35,
-    homework_weight: 25,
-    message_weight: 10,
-    activity_weight: 10
-  });
+  const [evaluationWeights, setEvaluationWeights] = useState<EvaluationWeights>(DEFAULT_EVALUATION_WEIGHTS);
   const [recoverySessionId, setRecoverySessionId] = useState<number | "">("");
   const [recoveryStartedAt, setRecoveryStartedAt] = useState("");
   const [recoveryEndedAt, setRecoveryEndedAt] = useState("");
@@ -255,7 +298,16 @@ export function TeacherPage() {
   const [selectedPort, setSelectedPort] = useState<number | "">("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
   const { isAuthenticated, setTeacherSession, logout: clearSession } = useAuthStore();
+
+  /** Session status: raw English → Chinese label */
+  const sessionStatusLabel = (s: string) =>
+    s === "ended" ? "已结束" : s === "active" ? "进行中" : "未开始";
 
   useEffect(() => {
     Promise.all([fetchHealth(), fetchStartupStatus(), fetchAuthStatus()])
@@ -266,6 +318,17 @@ export function TeacherPage() {
       })
       .catch((err: Error) => setError(err.message));
   }, []);
+
+  // Auto-logout when backend reports token expired (401)
+  useEffect(() => {
+    const onAuthExpired = () => {
+      clearSession();
+      setMessage("");
+      setError("登录已过期，请重新登录");
+    };
+    window.addEventListener("auth:expired", onAuthExpired);
+    return () => window.removeEventListener("auth:expired", onAuthExpired);
+  }, [clearSession]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -523,13 +586,17 @@ export function TeacherPage() {
     if (!file) {
       return;
     }
+    setUploading(true);
+    setUploadError("");
     try {
       const job = await uploadStudentExcel(file);
-      const suggested: Record<string, string> = {};
-      Object.entries(job.standard_fields).forEach(([field, label]) => {
-        const match = job.headers.find((header) => header.includes(label) || label.includes(header));
+      const suggested: Record<number, string> = {};
+      job.headers.forEach((header, idx) => {
+        const match = Object.entries(job.standard_fields).find(([, label]) =>
+          header.includes(label) || label.includes(header)
+        );
         if (match) {
-          suggested[match] = field;
+          suggested[idx] = match[0];
         }
       });
       setImportJob(job);
@@ -537,7 +604,11 @@ export function TeacherPage() {
       setImportPreview(null);
       setMessage("Excel 已解析");
     } catch (err) {
-      setError((err as Error).message);
+      const msg = (err as Error).message || "上传失败，请检查文件格式和网络连接";
+      setError(msg);
+      setUploadError(msg);
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -545,12 +616,22 @@ export function TeacherPage() {
     if (!importJob) {
       return;
     }
+    setPreviewing(true);
     try {
-      setImportPreview(await previewStudentImport(importJob.job_id, fieldMapping));
+      // Convert index-based mapping to {header: field} for backend
+      const headerMapping: Record<string, string> = {};
+      importJob.headers.forEach((header, idx) => {
+        if (fieldMapping[idx]) {
+          headerMapping[header] = fieldMapping[idx];
+        }
+      });
+      setImportPreview(await previewStudentImport(importJob.job_id, headerMapping));
       setMessage("导入预览已生成");
-    } catch (err) {
-      setError((err as Error).message);
+      setConfirmError("");
+    } catch (err: any) {
+      setConfirmError(err.message || "预览生成失败");
     }
+    setPreviewing(false);
   }
 
   async function handleSuggestImportMapping() {
@@ -559,7 +640,14 @@ export function TeacherPage() {
     }
     try {
       const suggestion = await suggestStudentImportMapping(importJob.job_id);
-      setFieldMapping(suggestion.mapping);
+      // Convert backend {header: field} format to index-based mapping
+      const indexMapping: Record<number, string> = {};
+      importJob.headers.forEach((header, idx) => {
+        if (suggestion.mapping[header]) {
+          indexMapping[idx] = suggestion.mapping[header];
+        }
+      });
+      setFieldMapping(indexMapping);
       setMessage(suggestion.message);
     } catch (err) {
       setError((err as Error).message);
@@ -567,22 +655,41 @@ export function TeacherPage() {
   }
 
   async function handleConfirmImport() {
-    if (!importJob || !selectedCourseId) {
-      setError("请先选择课程并生成导入预览");
+    if (!importJob) {
+      setConfirmError("请先上传 Excel 文件");
       return;
     }
+    if (!selectedCourseId) {
+      setConfirmError("请先在上方选择一个课程，再确认导入");
+      return;
+    }
+    if (!importPreview) {
+      setConfirmError("请先生成导入预览");
+      return;
+    }
+    setConfirmError("");
+    setConfirming(true);
     try {
+      // Convert index-based mapping back to {header: field} for backend
+      const headerMapping: Record<string, string> = {};
+      importJob.headers.forEach((header, idx) => {
+        if (fieldMapping[idx]) {
+          headerMapping[header] = fieldMapping[idx];
+        }
+      });
       const result = await confirmStudentImport(
         importJob.job_id,
         Number(selectedCourseId),
-        fieldMapping,
+        headerMapping,
         true,
         duplicateStrategy
       );
       await reloadAcademic();
-      setMessage(`导入 ${result.imported} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人`);
-    } catch (err) {
-      setError((err as Error).message);
+      setMessage(`导入成功：新增 ${result.imported} 人，更新 ${result.updated} 人，跳过 ${result.skipped} 人`);
+      setConfirming(false);
+    } catch (err: any) {
+      setConfirmError(err.message || "导入失败，请重试");
+      setConfirming(false);
     }
   }
 
@@ -631,22 +738,38 @@ export function TeacherPage() {
 
   async function handleLoadSignIns(sessionId: number) {
     try {
-      setSignInSummary(await fetchSignInSummary(sessionId));
-      setSignInLogs(await fetchSignInLogs(sessionId));
-      setMessage("签到统计已刷新");
+      const [summary, logs, alerts] = await Promise.all([
+        fetchSignInSummary(sessionId),
+        fetchSignInLogs(sessionId),
+        fetchDeviceAlerts(sessionId).catch(() => [] as DeviceSharingAlert[]),
+      ]);
+      setSignInSummary(summary);
+      setSignInLogs(logs);
+      setDeviceAlerts(alerts);
+      setMessage(alerts.length > 0 ? `签到统计已刷新，发现 ${alerts.length} 条设备共用警告` : "签到统计已刷新");
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
-  async function handleUpdateSignIn(studentPk: number, status: "normal" | "late" | "absent") {
+  async function handleReviewAlert(alertId: number) {
+    try {
+      await reviewDeviceAlert(alertId);
+      setDeviceAlerts((current) => current.map((a) => (a.id === alertId ? { ...a, reviewed: 1 } : a)));
+      setMessage("警告已标记为已审核");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleUpdateSignIn(studentPk: number, status: "normal" | "late" | "absent" | "leave") {
     if (!signInSummary) {
       return;
     }
     try {
       setSignInSummary(await updateSignInStatus(signInSummary.session.id, studentPk, status, signInReason || undefined));
       setSignInLogs(await fetchSignInLogs(signInSummary.session.id));
-      setMessage(status === "absent" ? "签到状态已改为缺勤" : "补签/状态修改已保存");
+      setMessage(status === "absent" ? "签到状态已改为缺勤" : status === "leave" ? "签到状态已改为请假" : "补签/状态修改已保存");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -682,6 +805,47 @@ export function TeacherPage() {
       setAnnouncementContent("");
       setAnnouncements(await fetchAnnouncements(Number(announcementSessionId)));
       setMessage("公告已发布");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadInteraction(sessionId: number) {
+    try {
+      setInteractionSessionId(sessionId);
+      const [settings, messages] = await Promise.all([
+        fetchInteractionSettings(sessionId),
+        fetchInteractionMessages(sessionId)
+      ]);
+      setInteractionSettings(settings);
+      setInteractionMessages(messages);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleToggleInteraction(enabled: boolean) {
+    if (!interactionSessionId) {
+      return;
+    }
+    try {
+      setInteractionSettings(await updateInteractionSettings(Number(interactionSessionId), enabled));
+      setMessage(enabled ? "已允许学生互动发言" : "已暂停学生互动发言");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handlePublishTeacherInteraction() {
+    if (!interactionSessionId) {
+      setError("请先选择互动课堂");
+      return;
+    }
+    try {
+      await publishTeacherInteractionMessage(Number(interactionSessionId), interactionContent);
+      setInteractionContent("");
+      setInteractionMessages(await fetchInteractionMessages(Number(interactionSessionId)));
+      setMessage("课堂互动消息已发送");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -926,7 +1090,7 @@ export function TeacherPage() {
     try {
       const report = await calculateEvaluation(Number(evaluationSessionId), versionType);
       setEvaluationReport(report);
-      setEvaluationWeights(report.weights);
+      setEvaluationWeights(pickEvaluationWeights(report.weights));
       setMessage(versionType === "final" ? "最终评估已生成" : "临时评估已生成");
     } catch (err) {
       setError((err as Error).message);
@@ -939,7 +1103,7 @@ export function TeacherPage() {
       const report = await fetchEvaluationReport(sessionId);
       setEvaluationReport(report);
       if (Object.keys(report.weights).length) {
-        setEvaluationWeights(report.weights);
+        setEvaluationWeights(pickEvaluationWeights(report.weights));
       }
     } catch (err) {
       setError((err as Error).message);
@@ -951,7 +1115,7 @@ export function TeacherPage() {
       Object.entries(evaluationWeights).map(([key, value]) => [key, Number(value) || 0])
     );
     try {
-      setEvaluationWeights(await updateEvaluationWeights(payload));
+      setEvaluationWeights(pickEvaluationWeights(await updateEvaluationWeights(payload)));
       setMessage("评估权重已保存");
     } catch (err) {
       setError((err as Error).message);
@@ -1441,8 +1605,8 @@ export function TeacherPage() {
                 <Grid item xs={12} md={5}>
                   <Stack spacing={1.5}>
                     <Typography fontWeight={700}>Excel 学生导入</Typography>
-                    <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>
-                      上传 .xlsx
+                    <Button component="label" variant="outlined" startIcon={uploading ? <CircularProgress size={18} color="inherit" /> : <UploadFileIcon />} disabled={uploading}>
+                      {uploading ? "正在解析..." : "上传 .xlsx"}
                       <input
                         type="file"
                         hidden
@@ -1450,6 +1614,9 @@ export function TeacherPage() {
                         onChange={(event) => handleExcelUpload(event.target.files?.[0] ?? null)}
                       />
                     </Button>
+                    {uploadError && (
+                      <Alert severity="error" sx={{ mt: 1 }}>{uploadError}</Alert>
+                    )}
                     {importJob && (
                       <Alert severity="info">
                         {importJob.file_name}，共 {importJob.total_rows} 行数据
@@ -1457,15 +1624,15 @@ export function TeacherPage() {
                     )}
                     {importJob && (
                       <Stack spacing={1}>
-                        {importJob.headers.map((header) => (
-                          <FormControl key={header} fullWidth size="small">
-                            <InputLabel id={`mapping-${header}`}>{header}</InputLabel>
+                        {importJob.headers.map((header, idx) => (
+                          <FormControl key={`hdr-${idx}`} fullWidth size="small">
+                            <InputLabel id={`mapping-${idx}`}>{header}</InputLabel>
                             <Select
-                              labelId={`mapping-${header}`}
+                              labelId={`mapping-${idx}`}
                               label={header}
-                              value={fieldMapping[header] ?? ""}
+                              value={fieldMapping[idx] ?? ""}
                               onChange={(event) =>
-                                setFieldMapping((current) => ({ ...current, [header]: event.target.value }))
+                                setFieldMapping((current) => ({ ...current, [idx]: event.target.value }))
                               }
                             >
                               <MenuItem value="">不导入</MenuItem>
@@ -1481,8 +1648,8 @@ export function TeacherPage() {
                           <Button variant="outlined" startIcon={<PsychologyIcon />} onClick={handleSuggestImportMapping}>
                             AI 映射
                           </Button>
-                          <Button variant="contained" onClick={handlePreviewImport}>
-                            生成预览
+                          <Button variant="contained" onClick={handlePreviewImport} disabled={previewing} startIcon={previewing ? <CircularProgress size={16} color="inherit" /> : undefined}>
+                            {previewing ? "生成中..." : "生成预览"}
                           </Button>
                         </Stack>
                       </Stack>
@@ -1525,7 +1692,7 @@ export function TeacherPage() {
                             </TableBody>
                           </Table>
                         </Paper>
-                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems="flex-start">
                           <FormControl size="small" sx={{ minWidth: 160 }}>
                             <InputLabel id="duplicate-strategy-label">重复学号</InputLabel>
                             <Select
@@ -1539,15 +1706,25 @@ export function TeacherPage() {
                               <MenuItem value="skip">跳过重复</MenuItem>
                             </Select>
                           </FormControl>
-                          <Button variant="contained" onClick={handleConfirmImport} disabled={Boolean(importPreview.error_count)}>
-                            确认导入有效数据
+                          <Button
+                            variant="contained"
+                            onClick={handleConfirmImport}
+                            disabled={confirming || Boolean(importPreview?.error_count)}
+                            startIcon={confirming ? <CircularProgress size={16} color="inherit" /> : undefined}
+                          >
+                            {confirming ? "正在导入..." : "确认导入有效数据"}
                           </Button>
-                          {importPreview.error_count > 0 && (
+                          {importPreview && importPreview.error_count > 0 && (
                             <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadImportErrors}>
                               错误报告
                             </Button>
                           )}
                         </Stack>
+                        {confirmError && (
+                          <Alert severity="error" sx={{ mt: 1 }}>
+                            {confirmError}
+                          </Alert>
+                        )}
                       </>
                     ) : (
                       <Typography color="text.secondary">上传文件并完成字段映射后生成预览。</Typography>
@@ -1566,11 +1743,19 @@ export function TeacherPage() {
                   <Stack spacing={1}>
                     {sessions.slice(0, 5).map((session) => (
                       <Box key={session.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                        <Typography>
-                          第 {session.session_no} 次：{session.title}
-                        </Typography>
-                        <Typography color="text.secondary">
-                          {session.course_name} / {session.class_name} / {session.status}
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                          <Typography fontWeight={500}>
+                            第 {session.session_no} 次：{session.title}
+                          </Typography>
+                          <Chip
+                            label={sessionStatusLabel(session.status)}
+                            size="small"
+                            color={session.status === "active" ? "success" : session.status === "ended" ? "default" : "warning"}
+                            variant="outlined"
+                          />
+                        </Box>
+                        <Typography color="text.secondary" variant="body2">
+                          {session.course_name} / {session.class_name}
                         </Typography>
                       </Box>
                     ))}
@@ -1650,15 +1835,15 @@ export function TeacherPage() {
                         </Select>
                       </FormControl>
                       <Grid container spacing={1}>
-                        {Object.entries(evaluationWeights).map(([key, value]) => (
-                          <Grid item xs={6} sm={4} key={key}>
+                        {EVALUATION_WEIGHT_FIELDS.map((field) => (
+                          <Grid item xs={6} sm={4} key={field.key}>
                             <TextField
                               size="small"
-                              label={key}
+                              label={field.label}
                               type="number"
-                              value={value}
+                              value={evaluationWeights[field.key]}
                               onChange={(event) =>
-                                setEvaluationWeights((current) => ({ ...current, [key]: event.target.value }))
+                                setEvaluationWeights((current) => ({ ...current, [field.key]: event.target.value }))
                               }
                               fullWidth
                             />
@@ -1857,7 +2042,7 @@ export function TeacherPage() {
                           <Typography fontWeight={700}>{signInSummary.session.title}</Typography>
                           <Typography color="text.secondary">
                             应到 {signInSummary.stats.total}，已签 {signInSummary.stats.signed}，迟到{" "}
-                            {signInSummary.stats.late}，缺勤 {signInSummary.stats.absent}，未处理{" "}
+                            {signInSummary.stats.late}，请假 {signInSummary.stats.leave}，缺勤 {signInSummary.stats.absent}，未处理{" "}
                             {signInSummary.stats.unsigned}
                           </Typography>
                         </Box>
@@ -1889,7 +2074,7 @@ export function TeacherPage() {
                                 <TableRow key={record.student_pk}>
                                   <TableCell>{record.student_number}</TableCell>
                                   <TableCell>{record.student_name}</TableCell>
-                                  <TableCell>{record.status ?? "未签到"}</TableCell>
+                                  <TableCell>{record.status ? SIGN_IN_STATUS_LABELS[record.status] ?? record.status : "未签到"}</TableCell>
                                   <TableCell>{record.sign_time ?? "-"}</TableCell>
                                   <TableCell>
                                     <Stack direction="row" spacing={0.5}>
@@ -1901,6 +2086,9 @@ export function TeacherPage() {
                                       </Button>
                                       <Button size="small" color="warning" onClick={() => handleUpdateSignIn(record.student_pk, "absent")}>
                                         缺勤
+                                      </Button>
+                                      <Button size="small" color="info" onClick={() => handleUpdateSignIn(record.student_pk, "leave")}>
+                                        请假
                                       </Button>
                                     </Stack>
                                   </TableCell>
@@ -1917,12 +2105,58 @@ export function TeacherPage() {
                             {signInLogs.map((log) => (
                               <Typography key={String(log.id)} variant="body2" color="text.secondary">
                                 {String(log.created_at)} / {String(log.student_number)} {String(log.student_name)}：
-                                {String(log.previous_status ?? "未签到")} {"->"} {String(log.new_status)} / {String(log.reason ?? "")}
+                                {String(log.previous_status ? SIGN_IN_STATUS_LABELS[String(log.previous_status)] ?? log.previous_status : "未签到")}{" "}
+                                {"->"} {String(SIGN_IN_STATUS_LABELS[String(log.new_status)] ?? log.new_status)} / {String(log.reason ?? "")}
                               </Typography>
                             ))}
                             {signInLogs.length === 0 && <Typography color="text.secondary">暂无手动调整记录。</Typography>}
                           </Stack>
                         </Paper>
+                        {deviceAlerts.length > 0 && (
+                          <Paper variant="outlined" sx={{ p: 1.5, borderColor: "warning.main", bgcolor: "warning.50" }}>
+                            <Stack spacing={1}>
+                              <Stack direction="row" spacing={1} alignItems="center">
+                                <WarningAmberIcon color="warning" fontSize="small" />
+                                <Typography fontWeight={700} color="warning.dark">
+                                  设备共用警告
+                                </Typography>
+                              </Stack>
+                              {deviceAlerts.filter((a) => !a.reviewed).length > 0 && (
+                                <Alert severity="warning" sx={{ py: 0 }}>
+                                  发现 {deviceAlerts.filter((a) => !a.reviewed).length} 条未审核的设备共用记录，可能存在替签到行为
+                                </Alert>
+                              )}
+                              {deviceAlerts.map((alert) => (
+                                <Box key={alert.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                                  <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap>
+                                    <Typography variant="body2" fontWeight={600}>
+                                      {alert.alert_level === "critical" ? "🔴 " : "🟡 "}
+                                      {alert.student_count} 人共用设备
+                                    </Typography>
+                                    <Stack direction="row" spacing={0.5} alignItems="center">
+                                      <Chip
+                                        size="small"
+                                        color={alert.reviewed ? "default" : "warning"}
+                                        label={alert.reviewed ? "已审核" : "待审核"}
+                                      />
+                                      {!alert.reviewed && (
+                                        <Button size="small" variant="outlined" onClick={() => handleReviewAlert(alert.id)}>
+                                          标记已审核
+                                        </Button>
+                                      )}
+                                    </Stack>
+                                  </Stack>
+                                  <Typography variant="body2" color="text.secondary">
+                                    学生：{alert.student_list || (Array.isArray(alert.student_ids) ? alert.student_ids.join(", ") : alert.student_ids_json)}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {alert.created_at} / 设备标识：{(alert.device_hash || "").substring(0, 16)}...
+                                  </Typography>
+                                </Box>
+                              ))}
+                            </Stack>
+                          </Paper>
+                        )}
                       </Stack>
                     ) : (
                       <Typography color="text.secondary">选择一堂课查看实时签到统计。</Typography>
@@ -2044,7 +2278,7 @@ export function TeacherPage() {
                       >
                         {sessions.map((session) => (
                           <MenuItem key={session.id} value={session.id}>
-                            #{session.id} {session.course_name} / {session.title} / {session.status}
+                            #{session.id} {session.course_name} / {session.title} / {sessionStatusLabel(session.status)}
                           </MenuItem>
                         ))}
                       </Select>
@@ -2338,7 +2572,7 @@ export function TeacherPage() {
                       >
                         {sessions.map((session) => (
                           <MenuItem key={session.id} value={session.id}>
-                            #{session.id} {session.course_name} / {session.title} / {session.status}
+                            #{session.id} {session.course_name} / {session.title} / {sessionStatusLabel(session.status)}
                           </MenuItem>
                         ))}
                       </Select>
@@ -2607,6 +2841,86 @@ export function TeacherPage() {
                       ))}
                       {announcements.length === 0 && (
                         <Typography color="text.secondary">选择课堂后可查看历史公告。</Typography>
+                      )}
+                    </Stack>
+                  </Paper>
+                </Grid>
+              </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2}>
+              <Box>
+                <Typography variant="h2">课堂互动</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  学生完成正常或迟到签到后可发言；教师可随时暂停学生发言。
+                </Typography>
+              </Box>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={5}>
+                  <Stack spacing={1.5}>
+                    <FormControl fullWidth>
+                      <InputLabel id="interaction-session-label">互动课堂</InputLabel>
+                      <Select
+                        labelId="interaction-session-label"
+                        label="互动课堂"
+                        value={interactionSessionId}
+                        onChange={(event) => handleLoadInteraction(Number(event.target.value))}
+                      >
+                        {sessions.map((session) => (
+                          <MenuItem key={session.id} value={session.id}>
+                            #{session.id} {session.course_name} / {session.title}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={Boolean(interactionSettings?.student_messages_enabled ?? true)}
+                          disabled={!interactionSessionId}
+                          onChange={(event) => handleToggleInteraction(event.target.checked)}
+                        />
+                      }
+                      label="允许学生互动发言"
+                    />
+                    <TextField
+                      label="教师互动消息"
+                      value={interactionContent}
+                      onChange={(event) => setInteractionContent(event.target.value)}
+                      multiline
+                      minRows={3}
+                      helperText={`${interactionContent.length}/300`}
+                      inputProps={{ maxLength: 300 }}
+                      fullWidth
+                    />
+                    <Button variant="contained" onClick={handlePublishTeacherInteraction}>
+                      发送互动消息
+                    </Button>
+                  </Stack>
+                </Grid>
+                <Grid item xs={12} md={7}>
+                  <Paper variant="outlined" sx={{ p: 2, minHeight: 260, maxHeight: 360, overflow: "auto" }}>
+                    <Stack spacing={1.5}>
+                      {interactionMessages.map((item) => (
+                        <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
+                            <Typography fontWeight={700}>{item.sender_name}</Typography>
+                            <Typography color="text.secondary" variant="body2">
+                              {item.created_at}
+                            </Typography>
+                          </Stack>
+                          <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+                        </Box>
+                      ))}
+                      {interactionMessages.length === 0 && (
+                        <Typography color="text.secondary">选择课堂后可查看互动留言。</Typography>
                       )}
                     </Stack>
                   </Paper>

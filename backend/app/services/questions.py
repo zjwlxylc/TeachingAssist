@@ -28,10 +28,13 @@ def _to_db_time(value: datetime) -> str:
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
-    normalized = value.replace("T", " ")
-    if len(normalized) == 16:
-        normalized = f"{normalized}:00"
-    return datetime.strptime(normalized[:19], TIME_FORMAT)
+    try:
+        normalized = value.replace("T", " ")
+        if len(normalized) == 16:
+            normalized = f"{normalized}:00"
+        return datetime.strptime(normalized[:19], TIME_FORMAT)
+    except (ValueError, IndexError):
+        return None
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -512,6 +515,7 @@ async def submit_answer(
     if not student_number.strip() or not name.strip():
         raise AppError("学号和姓名不能为空", code="STUDENT_ID_NAME_REQUIRED")
 
+    # Phase 1: Validate and insert answer within a single DB transaction (no AI calls)
     with get_connection() as connection:
         question = _load_question(connection, question_id)
         session = get_session_public(int(question["session_id"]))
@@ -568,9 +572,6 @@ async def submit_answer(
             ),
         )
         answer_id = int(cursor.lastrowid)
-        feedback_result: dict[str, Any] | None = None
-        if question["question_type"] == "short_answer" and status == "submitted":
-            feedback_result = _generate_short_answer_feedback(connection, answer_id, question, answer_text)
         if status in {"submitted", "timeout"}:
             _recalculate_question_bonus(connection, question_id)
         _log_action(connection, int(question["session_id"]), question_id, int(student["id"]), action, {"status": status})
@@ -584,6 +585,22 @@ async def submit_answer(
             (answer_id,),
         ).fetchone()
         result = _row_to_dict(row)
+
+    # Phase 2: Generate AI feedback outside DB transaction to avoid write-lock conflicts
+    feedback_result: dict[str, Any] | None = None
+    if question["question_type"] == "short_answer" and status == "submitted":
+        with get_connection() as connection:
+            feedback_result = _generate_short_answer_feedback(connection, answer_id, question, answer_text)
+        # Reload result to pick up AI feedback status update
+        with get_connection() as connection:
+            updated_row = connection.execute(
+                "SELECT ai_feedback_status, ai_feedback_json, quality_score FROM question_answers WHERE id = ?",
+                (answer_id,),
+            ).fetchone()
+            if updated_row:
+                result["ai_feedback_status"] = updated_row["ai_feedback_status"]
+                result["ai_feedback_json"] = updated_row["ai_feedback_json"]
+                result["quality_score"] = updated_row["quality_score"]
         if feedback_result:
             result["ai_feedback"] = feedback_result
 

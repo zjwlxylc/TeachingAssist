@@ -464,7 +464,7 @@ def check_content_safety(text: str, source_type: str = "manual_test", source_id:
         "action": action,
         "matched_keywords": matched_keywords,
         "original_length": len(original),
-        "sanitized_length": len(visible_text),
+        "sanitized_length": len(sanitized),
         "text": visible_text,
         "display_strategy": settings["display_strategy"],
         "message": "AI 反馈内容异常，请联系教师" if blocked else "内容安全检查通过",

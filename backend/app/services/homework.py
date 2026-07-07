@@ -36,10 +36,13 @@ def _to_db_time(value: datetime) -> str:
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
-    normalized = value.replace("T", " ")
-    if len(normalized) == 16:
-        normalized = f"{normalized}:00"
-    return datetime.strptime(normalized[:19], TIME_FORMAT)
+    try:
+        normalized = value.replace("T", " ")
+        if len(normalized) == 16:
+            normalized = f"{normalized}:00"
+        return datetime.strptime(normalized[:19], TIME_FORMAT)
+    except (ValueError, IndexError):
+        return None
 
 
 def _safe_filename(name: str) -> str:
@@ -126,24 +129,31 @@ def add_homework_attachments(homework_id: int, files: list[UploadFile] | None = 
     with get_connection() as connection:
         _load_homework(connection, homework_id)
         target_dir = _homework_upload_root(homework_id)
-        for file in files:
-            saved = _save_upload(file, target_dir)
-            connection.execute(
-                """
-                INSERT INTO homework_attachments(
-                    homework_id, original_name, stored_name, file_path, file_size, mime_type
+        saved_files: list[dict[str, Any]] = []
+        try:
+            for file in files:
+                saved = _save_upload(file, target_dir)
+                saved_files.append(saved)
+                connection.execute(
+                    """
+                    INSERT INTO homework_attachments(
+                        homework_id, original_name, stored_name, file_path, file_size, mime_type
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        homework_id,
+                        saved["original_name"],
+                        saved["stored_name"],
+                        saved["file_path"],
+                        saved["file_size"],
+                        saved["mime_type"],
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    homework_id,
-                    saved["original_name"],
-                    saved["stored_name"],
-                    saved["file_path"],
-                    saved["file_size"],
-                    saved["mime_type"],
-                ),
-            )
+        except Exception:
+            for saved in saved_files:
+                Path(saved["file_path"]).unlink(missing_ok=True)
+            raise
         homework = _load_homework(connection, homework_id)
     return _public_homework(homework)
 
@@ -241,25 +251,30 @@ def _save_upload(file: UploadFile, target_dir: Path) -> dict[str, Any]:
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
     target_path = target_dir / stored_name
     size = 0
-    with target_path.open("wb") as output:
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > MAX_FILE_SIZE:
-                output.close()
-                target_path.unlink(missing_ok=True)
-                raise AppError("单个文件不能超过 10MB", code="HOMEWORK_FILE_TOO_LARGE")
-            output.write(chunk)
-    file.file.seek(0)
-    return {
-        "original_name": original_name,
-        "stored_name": stored_name,
-        "file_path": str(target_path),
-        "file_size": size,
-        "mime_type": file.content_type,
-    }
+    try:
+        with target_path.open("wb") as output:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_FILE_SIZE:
+                    raise AppError("单个文件不能超过 10MB", code="HOMEWORK_FILE_TOO_LARGE")
+                output.write(chunk)
+        file.file.seek(0)
+        return {
+            "original_name": original_name,
+            "stored_name": stored_name,
+            "file_path": str(target_path),
+            "file_size": size,
+            "mime_type": file.content_type,
+        }
+    except AppError:
+        target_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        target_path.unlink(missing_ok=True)
+        raise AppError(f"文件保存失败: {str(exc)}", code="HOMEWORK_FILE_SAVE_FAILED")
 
 
 def submit_homework(
@@ -324,25 +339,31 @@ def submit_homework(
         submission_id = int(cursor.lastrowid)
 
         target_dir = _homework_upload_root(homework_id, submission_id)
-        for file in files:
-            saved = _save_upload(file, target_dir)
-            saved_files.append(saved)
-            connection.execute(
-                """
-                INSERT INTO homework_submission_files(
-                    submission_id, original_name, stored_name, file_path, file_size, mime_type
+        try:
+            for file in files:
+                saved = _save_upload(file, target_dir)
+                saved_files.append(saved)
+                connection.execute(
+                    """
+                    INSERT INTO homework_submission_files(
+                        submission_id, original_name, stored_name, file_path, file_size, mime_type
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        submission_id,
+                        saved["original_name"],
+                        saved["stored_name"],
+                        saved["file_path"],
+                        saved["file_size"],
+                        saved["mime_type"],
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    submission_id,
-                    saved["original_name"],
-                    saved["stored_name"],
-                    saved["file_path"],
-                    saved["file_size"],
-                    saved["mime_type"],
-                ),
-            )
+        except Exception:
+            # Clean up all saved files on partial failure to prevent orphaned files
+            for saved in saved_files:
+                Path(saved["file_path"]).unlink(missing_ok=True)
+            raise
         row = connection.execute(
             """
             SELECT hs.*, s.student_id AS student_number, s.name AS student_name
@@ -422,9 +443,10 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 def start_ai_review(homework_id: int) -> dict[str, Any]:
+    # Phase 1: Load homework and submissions (read-only)
     with get_connection() as connection:
         homework = _load_homework(connection, homework_id)
-        submissions = connection.execute(
+        submission_rows = connection.execute(
             """
             SELECT hs.*, s.student_id AS student_number, s.name AS student_name
             FROM homework_submissions hs
@@ -435,6 +457,10 @@ def start_ai_review(homework_id: int) -> dict[str, Any]:
             """,
             (homework_id,),
         ).fetchall()
+        submissions = [_row_to_dict(row) for row in submission_rows]
+
+    # Phase 2: Create review job and call AI for each submission (outside read transaction)
+    with get_connection() as connection:
         cursor = connection.execute(
             """
             INSERT INTO homework_review_jobs(homework_id, status, total_count, reviewed_count, manual_count, message)
@@ -443,28 +469,48 @@ def start_ai_review(homework_id: int) -> dict[str, Any]:
             (homework_id, len(submissions), "AI 批阅任务已启动"),
         )
         job_id = int(cursor.lastrowid)
-        reviewed = 0
-        manual = 0
-        for row in submissions:
-            submission = _row_to_dict(row)
-            try:
-                result = ai_service.generate_structured_json(
-                    "homework_review",
-                    (
-                        "请按评分标准批阅作业，仅返回 JSON，字段必须包含："
-                        "score, level, strengths, problems, suggestions, comment, confidence。\n"
-                        f"作业标题：{homework['title']}\n作业要求：{homework.get('description') or ''}\n"
-                        f"评分标准：{homework.get('grading_criteria') or ''}\n"
-                        f"学生：{submission['student_number']} {submission['student_name']}\n"
-                        f"提交内容：{submission.get('text_content') or ''}"
-                    ),
-                    source_type="homework_submission",
-                    source_id=int(submission["id"]),
-                    retries=2,
-                )
-                required = {"score", "level", "strengths", "problems", "suggestions", "comment", "confidence"}
-                if not required.issubset(result):
-                    raise AppError("AI 批阅结果缺少结构化字段", code="HOMEWORK_REVIEW_SCHEMA_INVALID")
+
+    reviewed = 0
+    manual = 0
+    review_results: list[dict[str, Any]] = []
+    for submission in submissions:
+        try:
+            result = ai_service.generate_structured_json(
+                "homework_review",
+                (
+                    "请按评分标准批阅作业，仅返回 JSON，字段必须包含："
+                    "score, level, strengths, problems, suggestions, comment, confidence。\n"
+                    f"作业标题：{homework['title']}\n作业要求：{homework.get('description') or ''}\n"
+                    f"评分标准：{homework.get('grading_criteria') or ''}\n"
+                    f"学生：{submission['student_number']} {submission['student_name']}\n"
+                    f"提交内容：{submission.get('text_content') or ''}"
+                ),
+                source_type="homework_submission",
+                source_id=int(submission["id"]),
+                retries=2,
+            )
+            required = {"score", "level", "strengths", "problems", "suggestions", "comment", "confidence"}
+            if not required.issubset(result):
+                raise AppError("AI 批阅结果缺少结构化字段", code="HOMEWORK_REVIEW_SCHEMA_INVALID")
+            review_results.append({"submission": submission, "result": result, "success": True})
+            reviewed += 1
+        except Exception as exc:
+            manual += 1
+            ai_service.record_failure_task(
+                "homework_review",
+                "homework_submission",
+                int(submission["id"]),
+                str(exc),
+                {"homework_id": homework_id},
+            )
+            review_results.append({"submission": submission, "error": str(exc), "success": False})
+
+    # Phase 3: Write all review results in a single transaction
+    with get_connection() as connection:
+        for item in review_results:
+            submission = item["submission"]
+            if item["success"]:
+                result = item["result"]
                 score = float(result.get("score") or 0)
                 confidence = float(result.get("confidence") or 0)
                 connection.execute(
@@ -483,16 +529,7 @@ def start_ai_review(homework_id: int) -> dict[str, Any]:
                     """,
                     (submission["id"], score, json.dumps(result, ensure_ascii=False)),
                 )
-                reviewed += 1
-            except Exception as exc:
-                manual += 1
-                ai_service.record_failure_task(
-                    "homework_review",
-                    "homework_submission",
-                    int(submission["id"]),
-                    str(exc),
-                    {"homework_id": homework_id},
-                )
+            else:
                 connection.execute(
                     """
                     UPDATE homework_submissions

@@ -33,7 +33,8 @@ def add_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(_request: Request, exc: Exception) -> JSONResponse:
-        app.logger.exception("Unexpected error", exc_info=exc) if hasattr(app, "logger") else None
+        if hasattr(app, "logger"):
+            app.logger.error("Unexpected error", exc_info=exc)
         return JSONResponse(
             status_code=500,
             content={"success": False, "code": "INTERNAL_ERROR", "message": "系统内部错误", "data": None},

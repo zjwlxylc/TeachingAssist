@@ -1,4 +1,6 @@
 import csv
+import json
+import logging
 from datetime import datetime, timedelta
 from io import StringIO
 from typing import Any
@@ -9,10 +11,105 @@ from app.services.backup import create_backup
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+logger = logging.getLogger(__name__)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     return dict(row)
+
+
+def _check_device_fingerprint(
+    connection: Any, session_id: int, student_id: int, device_hash: str, ip_address: str | None
+) -> dict[str, Any] | None:
+    """检测同一浏览器会话是否被多人用于签到，并结合 IP 做辅助判断"""
+    # 检查同一浏览器会话 ID 是否已被其他学生使用
+    other_records = connection.execute(
+        """
+        SELECT DISTINCT s.student_id, s.name, df.ip_address, df.sign_in_count
+        FROM device_fingerprints df
+        JOIN students s ON s.id = df.student_id
+        WHERE df.session_id = ? AND df.device_hash = ? AND df.student_id != ?
+        """,
+        (session_id, device_hash, student_id),
+    ).fetchall()
+
+    if not other_records:
+        return None
+
+    student_count = len(other_records) + 1
+    alert_level = "critical" if student_count >= 3 else "warning"
+
+    # IP 辅助判断：同一浏览器 + 同一 IP → 证据更充分
+    same_ip = all(
+        row["ip_address"] and row["ip_address"] == ip_address
+        for row in other_records
+    ) if ip_address else False
+
+    student_ids = [student_id] + [row["student_id"] for row in other_records]
+    connection.execute(
+        """
+        INSERT INTO device_sharing_alerts(session_id, device_hash, student_count, student_ids_json, alert_level)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, device_hash) DO UPDATE SET
+            student_count = excluded.student_count,
+            student_ids_json = excluded.student_ids_json,
+            alert_level = excluded.alert_level,
+            updated_at = datetime('now')
+        """,
+        (session_id, device_hash, student_count, json.dumps(student_ids), alert_level),
+    )
+
+    other_names = [f"{row['name']}({row['student_id']})" for row in other_records[:3]]
+    ip_note = "，且 IP 地址相同" if same_ip else ""
+    message = f"该浏览器已被 {', '.join(other_names)} 等 {len(other_records)} 人使用过{ip_note}"
+
+    return {
+        "level": alert_level,
+        "message": message,
+        "device_shared": True,
+        "shared_with_count": len(other_records),
+        "ip_matched": same_ip,
+    }
+
+
+def _record_device_fingerprint(
+    connection: Any,
+    session_id: int,
+    student_id: int,
+    device_hash: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    """记录浏览器会话 ID"""
+    existing = connection.execute(
+        """
+        SELECT id, sign_in_count FROM device_fingerprints
+        WHERE session_id = ? AND student_id = ? AND device_hash = ?
+        """,
+        (session_id, student_id, device_hash),
+    ).fetchone()
+
+    if existing:
+        connection.execute(
+            """
+            UPDATE device_fingerprints
+            SET sign_in_count = sign_in_count + 1,
+                last_seen_at = datetime('now'),
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (existing["id"],),
+        )
+    else:
+        connection.execute(
+            """
+            INSERT INTO device_fingerprints(
+                session_id, student_id, device_hash, ip_address, user_agent
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, student_id, device_hash, ip_address, user_agent),
+        )
 
 
 def _now() -> datetime:
@@ -26,10 +123,13 @@ def _to_db_time(value: datetime) -> str:
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
-    normalized = value.replace("T", " ")
-    if len(normalized) == 16:
-        normalized = f"{normalized}:00"
-    return datetime.strptime(normalized[:19], TIME_FORMAT)
+    try:
+        normalized = value.replace("T", " ")
+        if len(normalized) == 16:
+            normalized = f"{normalized}:00"
+        return datetime.strptime(normalized[:19], TIME_FORMAT)
+    except (ValueError, IndexError):
+        return None
 
 
 def _load_session(connection: Any, session_id: int) -> dict[str, Any]:
@@ -141,7 +241,7 @@ def refresh_session_statuses() -> list[int]:
         try:
             create_backup("class_ended")
         except Exception:
-            pass
+            logger.warning("Auto backup after session %s ended failed", _session_id, exc_info=True)
     return changed
 
 
@@ -213,7 +313,14 @@ def list_active_sessions() -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
 
-def student_sign_in(session_id: int, student_number: str, name: str, ip_address: str | None, user_agent: str | None) -> dict[str, Any]:
+def student_sign_in(
+    session_id: int,
+    student_number: str,
+    name: str,
+    ip_address: str | None,
+    user_agent: str | None,
+    device_hash: str | None = None,
+) -> dict[str, Any]:
     refresh_session_statuses()
     student_number = student_number.strip()
     name = name.strip()
@@ -258,17 +365,34 @@ def student_sign_in(session_id: int, student_number: str, name: str, ip_address:
             result["duplicate"] = True
             return result
 
+        # 浏览器会话检测
+        device_warning = None
+        if device_hash:
+            device_warning = _check_device_fingerprint(connection, session_id, int(student["id"]), device_hash, ip_address)
+
         started_at = _parse_time(session.get("actual_started_at")) or _parse_time(session.get("start_time")) or _now()
         deadline = started_at + timedelta(minutes=int(session.get("sign_in_deadline_minutes") or 15))
         sign_time = _now()
         status = "late" if sign_time > deadline else "normal"
         cursor = connection.execute(
             """
-            INSERT INTO sign_in_records(session_id, student_id, status, sign_time, ip_address, user_agent)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sign_in_records(session_id, student_id, status, sign_time, ip_address, user_agent, device_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, student["id"], status, _to_db_time(sign_time), ip_address, user_agent),
+            (session_id, student["id"], status, _to_db_time(sign_time), ip_address, user_agent, device_hash),
         )
+
+        # 记录浏览器会话 ID
+        if device_hash:
+            _record_device_fingerprint(
+                connection,
+                session_id,
+                int(student["id"]),
+                device_hash,
+                ip_address,
+                user_agent,
+            )
+
         row = connection.execute(
             """
             SELECT r.*, s.student_id AS student_number, s.name AS student_name
@@ -280,6 +404,8 @@ def student_sign_in(session_id: int, student_number: str, name: str, ip_address:
         ).fetchone()
     result = _row_to_dict(row)
     result["duplicate"] = False
+    if device_warning:
+        result["device_warning"] = device_warning
     return result
 
 
@@ -307,8 +433,9 @@ def get_sign_in_summary(session_id: int) -> dict[str, Any]:
     normal = sum(1 for item in records if item.get("status") == "normal")
     late = sum(1 for item in records if item.get("status") == "late")
     absent = sum(1 for item in records if item.get("status") == "absent")
+    leave = sum(1 for item in records if item.get("status") == "leave")
     signed = normal + late
-    unsigned = total - signed - absent
+    unsigned = total - signed - absent - leave
     return {
         "session": session,
         "stats": {
@@ -317,6 +444,7 @@ def get_sign_in_summary(session_id: int) -> dict[str, Any]:
             "normal": normal,
             "late": late,
             "absent": absent,
+            "leave": leave,
             "unsigned": unsigned,
         },
         "records": records,
@@ -330,7 +458,7 @@ def update_sign_in_status(
     reason: str | None = None,
     operator_name: str | None = None,
 ) -> dict[str, Any]:
-    if status not in {"normal", "late", "absent"}:
+    if status not in {"normal", "late", "absent", "leave"}:
         raise AppError("签到状态不支持", code="SIGN_IN_STATUS_UNSUPPORTED")
     with get_connection() as connection:
         session = _load_session(connection, session_id)
@@ -394,7 +522,7 @@ def export_sign_ins(session_id: int) -> dict[str, Any]:
     output = StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=["student_number", "student_name", "class_name", "status", "sign_time", "ip_address"],
+        fieldnames=["student_number", "student_name", "class_name", "status", "sign_time", "ip_address", "device_hash"],
     )
     writer.writeheader()
     for record in summary["records"]:
@@ -406,6 +534,7 @@ def export_sign_ins(session_id: int) -> dict[str, Any]:
                 "status": record.get("status") or "absent",
                 "sign_time": record.get("sign_time") or "",
                 "ip_address": record.get("ip_address") or "",
+                "device_hash": (record.get("device_hash") or "")[:12],
             }
         )
     return {
@@ -414,3 +543,52 @@ def export_sign_ins(session_id: int) -> dict[str, Any]:
         "content": output.getvalue(),
         "total": len(summary["records"]),
     }
+
+
+def get_device_sharing_alerts(session_id: int) -> list[dict[str, Any]]:
+    """获取设备共享警告列表"""
+    get_session_public(session_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT dsa.*,
+                   GROUP_CONCAT(s.name || '(' || s.student_id || ')', ', ') as student_list
+            FROM device_sharing_alerts dsa
+            JOIN device_fingerprints df ON df.session_id = dsa.session_id AND df.device_hash = dsa.device_hash
+            JOIN students s ON s.id = df.student_id
+            WHERE dsa.session_id = ?
+            GROUP BY dsa.id
+            ORDER BY dsa.student_count DESC, dsa.created_at DESC
+            """,
+            (session_id,),
+        ).fetchall()
+    alerts = []
+    for row in rows:
+        alert = _row_to_dict(row)
+        alert["student_ids"] = json.loads(alert.get("student_ids_json") or "[]")
+        alerts.append(alert)
+    return alerts
+
+
+def review_device_alert(alert_id: int, reviewed_by: str, notes: str | None = None) -> dict[str, Any]:
+    """标记设备共享警告为已审核"""
+    with get_connection() as connection:
+        alert = connection.execute(
+            "SELECT * FROM device_sharing_alerts WHERE id = ?",
+            (alert_id,),
+        ).fetchone()
+        if alert is None:
+            raise AppError("警告记录不存在", code="ALERT_NOT_FOUND", status_code=404)
+        connection.execute(
+            """
+            UPDATE device_sharing_alerts
+            SET reviewed = 1, reviewed_by = ?, reviewed_at = datetime('now'), notes = ?
+            WHERE id = ?
+            """,
+            (reviewed_by, notes, alert_id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM device_sharing_alerts WHERE id = ?",
+            (alert_id,),
+        ).fetchone()
+    return _row_to_dict(updated)

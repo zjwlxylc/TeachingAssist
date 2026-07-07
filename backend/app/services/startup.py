@@ -1,8 +1,11 @@
 import asyncio
+import ctypes
 import logging
+import sys
+from ctypes import wintypes
 from pathlib import Path
 
-from app.core.config import AppSettings
+from app.core.config import AppSettings, PROJECT_ROOT
 from app.db.migrations import integrity_check, run_migrations
 from app.services.ai import check_connectivity, get_ai_overview
 
@@ -27,13 +30,62 @@ def initialize_directories(settings: AppSettings) -> list[Path]:
     return created
 
 
-def detect_removable_root(settings: AppSettings) -> Path | None:
-    if settings.storage.removable_root and settings.storage.removable_root.exists():
-        return settings.storage.removable_root
+def _windows_removable_drives() -> list[str]:
+    """Return root paths (e.g. 'E:\\') of removable drives on Windows."""
+    if sys.platform != "win32":
+        return []
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
+        return []
+    buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH + 1)
+    length = kernel32.GetLogicalDriveStringsW(wintypes.MAX_PATH, buf)
+    if not length:
+        return []
+    drives = [buf[i : i + 3] for i in range(0, length, 4)]
+    removable: list[str] = []
+    for drive in drives:
+        if not drive.endswith("\\"):
+            continue
+        try:
+            if kernel32.GetDriveTypeW(drive) == 2:  # DRIVE_REMOVABLE
+                removable.append(drive)
+        except OSError:
+            continue
+    return removable
 
-    project_drive = Path(__file__).resolve().anchor
-    candidate = Path(project_drive)
-    return candidate if candidate.exists() else None
+
+def _is_removable_drive(drive_root: str) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        return ctypes.windll.kernel32.GetDriveTypeW(drive_root) == 2
+    except (AttributeError, OSError):
+        return False
+
+
+def detect_removable_root(settings: AppSettings) -> Path | None:
+    configured = settings.storage.removable_root
+    if configured is not None:
+        # Resolve relative paths (e.g. ".") against the install location so a
+        # literal "." never leaks into the report.
+        if configured.is_absolute():
+            configured = configured.resolve()
+        else:
+            configured = (PROJECT_ROOT / configured).resolve()
+        if configured.exists():
+            return configured
+
+    # Auto-detect: prefer the drive that actually hosts the running program
+    # (reliable in both frozen and source mode, unlike __file__ which points
+    # into PyInstaller's temp extraction dir), otherwise scan removable drives.
+    exe_drive = Path(sys.executable).resolve().anchor
+    if _is_removable_drive(exe_drive):
+        return Path(exe_drive)
+    removable = _windows_removable_drives()
+    if removable:
+        return Path(removable[0])
+    return None
 
 
 def run_startup_checks(settings: AppSettings) -> dict[str, object]:

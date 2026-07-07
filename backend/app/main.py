@@ -58,6 +58,10 @@ def create_app() -> FastAPI:
         task = getattr(app.state, "auto_backup_task", None)
         if task:
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     return app
 

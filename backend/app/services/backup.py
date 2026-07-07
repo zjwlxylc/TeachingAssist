@@ -48,14 +48,12 @@ def create_backup(backup_type: str = "manual") -> list[dict[str, object]]:
     for target_name, target_dir in _backup_targets():
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"teaching_assist_{backup_type}_{_timestamp()}.db"
+        source_connection = None
+        target_connection = None
         try:
             source_connection = sqlite3.connect(source)
             target_connection = sqlite3.connect(target_path)
-            try:
-                source_connection.backup(target_connection)
-            finally:
-                target_connection.close()
-                source_connection.close()
+            source_connection.backup(target_connection)
             _record_backup(backup_type, target_name, target_path, "success")
             _cleanup_old_backups(target_dir)
             results.append(
@@ -69,6 +67,11 @@ def create_backup(backup_type: str = "manual") -> list[dict[str, object]]:
         except Exception as exc:
             _record_backup(backup_type, target_name, target_path, "failed", str(exc))
             results.append({"target": target_name, "file_path": str(target_path), "status": "failed", "message": str(exc)})
+        finally:
+            if target_connection:
+                target_connection.close()
+            if source_connection:
+                source_connection.close()
     return results
 
 
@@ -92,9 +95,20 @@ def list_backups() -> list[dict[str, object]]:
 
 
 def restore_backup(file_path: str) -> dict[str, object]:
-    source = Path(file_path)
+    source = Path(file_path).resolve()
     if not source.exists() or source.suffix.lower() != ".db":
         raise AppError("备份文件不存在或格式不正确", code="BACKUP_NOT_FOUND")
+
+    # Prevent path traversal: only allow restoring from known backup directories
+    settings = get_settings()
+    allowed_dirs: list[Path] = []
+    if settings.storage.backups_dir:
+        allowed_dirs.append(settings.storage.backups_dir.resolve())
+    removable_root = detect_removable_root(settings)
+    if removable_root:
+        allowed_dirs.append((removable_root / "backup").resolve())
+    if not any(source == allowed or allowed in source.parents for allowed in allowed_dirs):
+        raise AppError("备份文件不在允许的目录范围内", code="BACKUP_PATH_NOT_ALLOWED")
 
     database_path = get_database_path()
     safety_dir = get_settings().storage.backups_dir

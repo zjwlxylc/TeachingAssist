@@ -46,11 +46,20 @@ import {
   submitHomework
 } from "../api/homework";
 import { fetchStudentEvaluationFeedback } from "../api/evaluation";
+import {
+  InteractionMessage,
+  InteractionMessageCreated,
+  InteractionSettings,
+  InteractionSettingsUpdated,
+  fetchInteractionMessages,
+  fetchInteractionSettings,
+  publishStudentInteractionMessage
+} from "../api/interactions";
 import { recordCachedReplay } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 
-type ClassroomMessage = AnnouncementMessage | QuestionPublishedMessage;
+type ClassroomMessage = AnnouncementMessage | QuestionPublishedMessage | InteractionMessageCreated | InteractionSettingsUpdated;
 
 type CachedRequest =
   | {
@@ -81,6 +90,13 @@ const QUESTION_TYPE_LABELS: Record<Question["question_type"], string> = {
   short_answer: "简答题"
 };
 
+const SIGN_IN_STATUS_LABELS: Record<string, string> = {
+  normal: "正常",
+  late: "迟到",
+  absent: "缺勤",
+  leave: "请假"
+};
+
 export function StudentPage() {
   const [activeSessions, setActiveSessions] = useState<ClassroomSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<number | "">("");
@@ -90,6 +106,9 @@ export function StudentPage() {
   const [name, setName] = useState("");
   const [result, setResult] = useState<StudentSignInResult | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
+  const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
+  const [interactionContent, setInteractionContent] = useState("");
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<number, boolean>>({});
@@ -104,6 +123,7 @@ export function StudentPage() {
   const [error, setError] = useState("");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
   const lastAnnouncementIdRef = useRef(0);
+  const lastInteractionMessageIdRef = useRef(0);
 
   useEffect(() => {
     loadActiveSessions();
@@ -114,10 +134,13 @@ export function StudentPage() {
     socketRef.current?.close();
     socketRef.current = null;
     setAnnouncements([]);
+    setInteractionMessages([]);
+    setInteractionSettings(null);
     setQuestions([]);
     setHomeworkList([]);
     setSubmittedQuestions({});
     lastAnnouncementIdRef.current = 0;
+    lastInteractionMessageIdRef.current = 0;
     if (!currentSession?.id) {
       return undefined;
     }
@@ -134,15 +157,29 @@ export function StudentPage() {
         return Array.from(next.values()).sort((a, b) => b.id - a.id);
       });
     };
+    const mergeInteractionMessages = (items: InteractionMessage[]) => {
+      items.forEach((item) => {
+        lastInteractionMessageIdRef.current = Math.max(lastInteractionMessageIdRef.current, item.id);
+      });
+      setInteractionMessages((current) => {
+        const next = new Map<number, InteractionMessage>();
+        [...items, ...current].forEach((item) => next.set(item.id, item));
+        return Array.from(next.values()).sort((a, b) => b.id - a.id);
+      });
+    };
     const loadMessages = async (lastId?: number) => {
       try {
-        const [items, questionItems, homeworkItems] = await Promise.all([
+        const [items, interactionSettingsData, interactionItems, questionItems, homeworkItems] = await Promise.all([
           fetchAnnouncements(sessionId, lastId),
+          fetchInteractionSettings(sessionId),
+          fetchInteractionMessages(sessionId, lastId ? lastInteractionMessageIdRef.current : undefined),
           fetchPublicQuestions(sessionId),
           fetchPublicHomework(sessionId)
         ]);
         if (!disposed) {
           mergeAnnouncements(items);
+          setInteractionSettings(interactionSettingsData);
+          mergeInteractionMessages(interactionItems);
           if (questionItems.length) {
             setQuestions(questionItems);
           }
@@ -167,6 +204,12 @@ export function StudentPage() {
           mergeAnnouncements([payload.announcement]);
           setMessage("收到新的课堂公告");
         }
+        if (payload.type === "interaction.message.created") {
+          mergeInteractionMessages([payload.message]);
+        }
+        if (payload.type === "interaction.settings.updated") {
+          setInteractionSettings(payload.settings);
+        }
         if (payload.type === "question.published") {
           setQuestions((current) => {
             const next = new Map<number, Question>();
@@ -179,7 +222,7 @@ export function StudentPage() {
       3000,
       () => {
         const lastId = lastAnnouncementIdRef.current;
-        if (lastId) {
+        if (lastId || lastInteractionMessageIdRef.current) {
           loadMessages(lastId);
         }
         void replayCachedRequests(sessionId);
@@ -328,6 +371,25 @@ export function StudentPage() {
       const signInResult = await studentSignIn(sessionId, studentId, name);
       setResult(signInResult);
       setMessage(signInResult.duplicate ? "你已经完成过签到" : "签到成功");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSendInteractionMessage() {
+    const sessionId = currentSession?.id || Number(sessionIdInput);
+    if (!sessionId || !studentId || !name) {
+      setError("请先完成签到后再参与课堂互动");
+      return;
+    }
+    if (!result || !["normal", "late"].includes(result.status)) {
+      setError("完成正常或迟到签到后才能参与课堂互动");
+      return;
+    }
+    try {
+      await publishStudentInteractionMessage(sessionId, studentId, name, interactionContent);
+      setInteractionContent("");
+      setMessage("互动留言已发送");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -583,10 +645,17 @@ export function StudentPage() {
             </Button>
 
             {result && (
-              <Alert severity={result.status === "late" ? "warning" : "success"}>
-                {result.student_number} / {result.student_name} / {result.status}
-                {result.sign_time ? ` / ${result.sign_time}` : ""}
-              </Alert>
+              <Stack spacing={1}>
+                <Alert severity={result.status === "late" ? "warning" : "success"}>
+                  {result.student_number} / {result.student_name} / {SIGN_IN_STATUS_LABELS[result.status] ?? result.status}
+                  {result.sign_time ? ` / ${result.sign_time}` : ""}
+                </Alert>
+                {result.device_warning && (
+                  <Alert severity={result.device_warning.level === "critical" ? "error" : "warning"}>
+                    ⚠️ 设备共用警告：{result.device_warning.message}
+                  </Alert>
+                )}
+              </Stack>
             )}
           </Stack>
         </CardContent>
@@ -607,6 +676,58 @@ export function StudentPage() {
             {announcements.length === 0 && (
               <Typography color="text.secondary">进入课堂后可查看教师发布的公告。</Typography>
             )}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Card sx={{ maxWidth: 760 }}>
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Box>
+              <Typography variant="h2">课堂互动</Typography>
+              <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                完成签到后可参与课堂留言，全班可见。
+              </Typography>
+            </Box>
+            {interactionMessages.map((item) => (
+              <Paper key={item.id} variant="outlined" sx={{ p: 1.5 }}>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
+                  <Typography fontWeight={700}>{item.sender_name}</Typography>
+                  <Typography color="text.secondary" variant="body2">
+                    {item.created_at}
+                  </Typography>
+                </Stack>
+                <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+              </Paper>
+            ))}
+            {interactionMessages.length === 0 && (
+              <Typography color="text.secondary">暂无课堂互动留言。</Typography>
+            )}
+            {!result && <Alert severity="info">完成签到后可参与课堂互动。</Alert>}
+            {result && !Boolean(interactionSettings?.student_messages_enabled ?? true) && (
+              <Alert severity="warning">教师已暂停课堂互动发言，你仍可查看已有留言。</Alert>
+            )}
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+              <TextField
+                label="互动留言"
+                value={interactionContent}
+                onChange={(event) => setInteractionContent(event.target.value)}
+                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true)}
+                helperText={`${interactionContent.length}/300`}
+                inputProps={{ maxLength: 300 }}
+                fullWidth
+              />
+              <Button
+                variant="contained"
+                startIcon={<SendIcon />}
+                onClick={handleSendInteractionMessage}
+                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true)}
+                sx={{ minWidth: 120 }}
+              >
+                发送
+              </Button>
+            </Stack>
           </Stack>
         </CardContent>
       </Card>

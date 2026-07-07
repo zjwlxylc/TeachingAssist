@@ -1,0 +1,5 @@
+TeachingAssist v0.3.0
+build: 2026-07-06
+python: 3.13.12 (bundled)
+node: 22.22.2 (build-time)
+note: 修复 U 盘路径识别（removable_root）：自动识别程序所在可移动磁盘，盘符变化自适应

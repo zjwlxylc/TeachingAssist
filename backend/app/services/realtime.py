@@ -1,8 +1,13 @@
+import asyncio
 import json
+import logging
 from collections import defaultdict
 from typing import Any
 
 from fastapi import WebSocket
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -26,14 +31,18 @@ class ConnectionManager:
         if not sockets:
             return
         message = json.dumps(payload, ensure_ascii=False)
-        stale: list[WebSocket] = []
-        for websocket in sockets:
+
+        async def _safe_send(ws: WebSocket) -> WebSocket | None:
             try:
-                await websocket.send_text(message)
+                await ws.send_text(message)
+                return None
             except Exception:
-                stale.append(websocket)
-        for websocket in stale:
-            self.disconnect(session_id, websocket)
+                return ws
+
+        results = await asyncio.gather(*(_safe_send(ws) for ws in sockets))
+        for stale_ws in results:
+            if stale_ws is not None:
+                self.disconnect(session_id, stale_ws)
 
 
 manager = ConnectionManager()

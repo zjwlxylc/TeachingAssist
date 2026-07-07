@@ -259,17 +259,28 @@ def parse_excel_upload(file_name: str, file_size: int, content: bytes) -> dict[s
         raise AppError("当前环境暂不支持旧版 .xls，请另存为 .xlsx 后上传", code="XLS_NOT_SUPPORTED")
 
     workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
-    worksheet = workbook.active
-    rows = list(worksheet.iter_rows(values_only=True))
+    try:
+        worksheet = workbook.active
+        rows = list(worksheet.iter_rows(values_only=True))
+    finally:
+        workbook.close()
     if not rows:
         raise AppError("Excel 内容为空", code="EXCEL_EMPTY")
 
-    headers = [_normalize_cell_value(value) for value in rows[0]]
-    if not any(headers):
+    # 跳过开头全空的行，定位真正的表头（兼容首行标题/留白行）
+    header_index = 0
+    while header_index < len(rows):
+        candidate = [_normalize_cell_value(value) for value in rows[header_index]]
+        if any(candidate):
+            headers = candidate
+            break
+        header_index += 1
+    else:
         raise AppError("Excel 表头为空", code="EXCEL_HEADER_EMPTY")
 
     data_rows: list[dict[str, str]] = []
-    for row_index, row in enumerate(rows[1:], start=2):
+    # 数据行从表头下一行开始；Excel 行号从 1 计，表头在第 header_index+1 行，故数据起始行号 header_index+2
+    for row_index, row in enumerate(rows[header_index + 1:], start=header_index + 2):
         item: dict[str, str] = {"__row_number": str(row_index)}
         has_value = False
         for index, header in enumerate(headers):
@@ -408,6 +419,27 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
     if missing:
         raise AppError("必填字段未完成映射：" + "、".join(STANDARD_FIELDS[item] for item in missing), code="IMPORT_MAPPING_REQUIRED")
 
+    # Batch-check existing student IDs to avoid N+1 connection overhead
+    all_student_numbers: list[str] = []
+    for raw in job["rows"]:
+        normalized = {
+            field: _normalize_import_field(field, raw.get(source, ""))
+            for field, source in reverse_mapping.items()
+        }
+        student_number = normalized.get("student_id", "")
+        if student_number:
+            all_student_numbers.append(student_number)
+
+    existing_student_ids: set[str] = set()
+    if all_student_numbers:
+        with get_connection() as connection:
+            placeholders = ",".join("?" for _ in all_student_numbers)
+            existing_rows = connection.execute(
+                f"SELECT DISTINCT student_id FROM students WHERE student_id IN ({placeholders})",
+                tuple(all_student_numbers),
+            ).fetchall()
+        existing_student_ids = {row["student_id"] for row in existing_rows}
+
     seen: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     errors = 0
@@ -435,12 +467,7 @@ def _build_import_preview(job: dict[str, Any], mapping: dict[str, str]) -> dict[
                 row_errors.append(f"学号重复，首次出现在第 {seen[student_number]} 行")
             else:
                 seen[student_number] = row_number
-        with get_connection() as connection:
-            exists = connection.execute(
-                "SELECT id FROM students WHERE student_id = ?",
-                (student_number,),
-            ).fetchone() if student_number else None
-        if exists:
+        if student_number and student_number in existing_student_ids:
             row_warnings.append("学号已存在，确认导入时会更新学生信息")
         errors += len(row_errors)
         warnings += len(row_warnings)
