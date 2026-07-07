@@ -30,6 +30,28 @@ export interface InteractionSettingsUpdated {
   settings: InteractionSettings;
 }
 
+export interface InteractionModerated {
+  type: "interaction.moderated";
+  session_id: number;
+  log_id: number;
+  student_id: number;
+  student_name: string;
+  content: string;
+  reason: string;
+}
+
+export interface InteractionModerationLog {
+  id: number;
+  session_id: number;
+  student_id: number;
+  student_name: string;
+  content: string;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  reviewed_at: string | null;
+  created_at: string;
+}
+
 export function fetchInteractionSettings(sessionId: number) {
   return request<InteractionSettings>(`/interactions/sessions/${sessionId}/settings`);
 }
@@ -58,4 +80,23 @@ export function publishStudentInteractionMessage(sessionId: number, studentId: s
     method: "POST",
     body: JSON.stringify({ student_id: studentId, name, content })
   });
+}
+
+export function fetchModerationLogs(sessionId: number, status?: string) {
+  const query = status ? `?status=${status}` : "";
+  return request<InteractionModerationLog[]>(`/interactions/sessions/${sessionId}/moderation/logs${query}`);
+}
+
+export function approveModerationLog(sessionId: number, logId: number) {
+  return request<{ log_id: number; status: string; message: InteractionMessage | null }>(
+    `/interactions/sessions/${sessionId}/moderation/${logId}/approve`,
+    { method: "POST" }
+  );
+}
+
+export function rejectModerationLog(sessionId: number, logId: number) {
+  return request<{ log_id: number; status: string; message: InteractionMessage | null }>(
+    `/interactions/sessions/${sessionId}/moderation/${logId}/reject`,
+    { method: "POST" }
+  );
 }

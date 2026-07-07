@@ -68,7 +68,7 @@ INSERT OR IGNORE INTO ai_provider_configs(
     id, provider_name, display_name, base_url, model_name, enabled, is_active, last_status
 )
 VALUES
-    (1, 'deepseek', 'DeepSeek', 'https://api.deepseek.com/v1', 'deepseek-chat', 0, 1, 'disabled'),
-    (2, 'zhipu', '智谱 GLM', 'https://open.bigmodel.cn/api/paas/v4', 'glm-4-flash', 0, 0, 'disabled'),
+    (1, 'deepseek', 'DeepSeek', 'https://api.deepseek.com/v1', 'deepseek-chat', 0, 0, 'disabled'),
+    (2, 'zhipu', '智谱 GLM', 'https://open.bigmodel.cn/api/paas/v4', 'glm-4-flash', 0, 1, 'disabled'),
     (3, 'qwen', '通义千问', 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen-plus', 0, 0, 'disabled'),
     (4, 'openai', 'OpenAI', 'https://api.openai.com/v1', 'gpt-4o-mini', 0, 0, 'disabled');

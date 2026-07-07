@@ -49,6 +49,7 @@ import { fetchStudentEvaluationFeedback } from "../api/evaluation";
 import {
   InteractionMessage,
   InteractionMessageCreated,
+  InteractionModerated,
   InteractionSettings,
   InteractionSettingsUpdated,
   fetchInteractionMessages,
@@ -67,7 +68,12 @@ import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { useStatusStore } from "../store/statusStore";
 
-type ClassroomMessage = AnnouncementMessage | QuestionPublishedMessage | InteractionMessageCreated | InteractionSettingsUpdated;
+type ClassroomMessage =
+  | AnnouncementMessage
+  | QuestionPublishedMessage
+  | InteractionMessageCreated
+  | InteractionSettingsUpdated
+  | InteractionModerated;
 
 type CachedRequest =
   | {
@@ -117,6 +123,7 @@ export function StudentPage() {
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
+  const [sendingInteraction, setSendingInteraction] = useState(false);
   const [privateMessages, setPrivateMessages] = useState<PrivateMessage[]>([]);
   const [privateContent, setPrivateContent] = useState("");
   const privateSocketRef = useRef<TeachingAssistSocket | null>(null);
@@ -133,6 +140,7 @@ export function StudentPage() {
   const [cachedCount, setCachedCount] = useState(0);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [snackError, setSnackError] = useState("");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
   const lastAnnouncementIdRef = useRef(0);
   const lastInteractionMessageIdRef = useRef(0);
@@ -469,12 +477,25 @@ export function StudentPage() {
       setError("完成正常或迟到签到后才能参与课堂互动");
       return;
     }
+    if (sendingInteraction) {
+      return;
+    }
+    setSendingInteraction(true);
     try {
       await publishStudentInteractionMessage(sessionId, studentId, name, interactionContent);
       setInteractionContent("");
       setMessage("互动留言已发送");
     } catch (err) {
-      setError((err as Error).message);
+      const msg = (err as Error).message;
+      if (msg.startsWith("内容未通过审核")) {
+        // AI 拦截：用浮动气泡提醒，并清空输入框，避免学生误以为已发出
+        setSnackError(msg);
+        setInteractionContent("");
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setSendingInteraction(false);
     }
   }
 
@@ -869,10 +890,10 @@ export function StudentPage() {
                 variant="contained"
                 startIcon={<SendIcon />}
                 onClick={handleSendInteractionMessage}
-                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true)}
+                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true) || sendingInteraction}
                 sx={{ minWidth: 120 }}
               >
-                发送
+                {sendingInteraction ? "审核中…" : "发送"}
               </Button>
             </Stack>
           </Stack>
@@ -1033,6 +1054,7 @@ export function StudentPage() {
       </Card>
 
       <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
+      <AppSnackbar open={Boolean(snackError)} message={snackError} severity="error" onClose={() => setSnackError("")} />
     </Stack>
   );
 }

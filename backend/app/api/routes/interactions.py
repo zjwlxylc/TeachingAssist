@@ -69,3 +69,36 @@ async def publish_student_message(
         await interaction_service.publish_student_message(session_id, payload.student_id, payload.name, payload.content),
         message="课堂互动消息已发送",
     )
+
+
+@router.get("/sessions/{session_id}/moderation/logs", response_model=ApiResponse[list[dict[str, object]]])
+def list_moderation_logs(
+    session_id: int,
+    status: str | None = None,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[list[dict[str, object]]]:
+    return ok(interaction_service.list_moderation_logs(session_id, status))
+
+
+@router.post("/sessions/{session_id}/moderation/{log_id}/approve", response_model=ApiResponse[dict[str, object]])
+async def approve_moderation_log(
+    session_id: int,
+    log_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(
+        await interaction_service.review_moderation_log(session_id, log_id, approve=True),
+        message="发言已放行上墙",
+    )
+
+
+@router.post("/sessions/{session_id}/moderation/{log_id}/reject", response_model=ApiResponse[dict[str, object]])
+async def reject_moderation_log(
+    session_id: int,
+    log_id: int,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(
+        await interaction_service.review_moderation_log(session_id, log_id, approve=False),
+        message="发言已忽略",
+    )

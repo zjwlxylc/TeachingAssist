@@ -83,6 +83,7 @@ export function AppLayout({ children }: PropsWithChildren) {
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              color: "#ff7a00",
             }}
           >
             AI课堂辅助

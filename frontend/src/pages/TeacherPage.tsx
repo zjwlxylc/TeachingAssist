@@ -141,7 +141,8 @@ import {
   fetchAiFailureTasks,
   fetchAiOverview,
   updateAiProvider,
-  updateAiSafety
+  updateAiSafety,
+  toggleModerationEnabled
 } from "../api/ai";
 import {
   EvaluationReport,
@@ -152,12 +153,18 @@ import {
 } from "../api/evaluation";
 import {
   InteractionMessage,
+  InteractionModerated,
+  InteractionModerationLog,
   InteractionSettings,
+  approveModerationLog,
   fetchInteractionMessages,
   fetchInteractionSettings,
+  fetchModerationLogs,
   publishTeacherInteractionMessage,
+  rejectModerationLog,
   updateInteractionSettings
 } from "../api/interactions";
+import { classroomSocketUrl } from "../api/announcements";
 import {
   ConversationSummary,
   MessageCreated,
@@ -176,6 +183,7 @@ import {
 } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
+import Switch from "@mui/material/Switch";
 import { useAuthStore } from "../store/authStore";
 import { useStatusStore } from "../store/statusStore";
 
@@ -300,6 +308,8 @@ export function TeacherPage() {
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
+  const [moderationLogs, setModerationLogs] = useState<InteractionModerationLog[]>([]);
+  const [moderationLoading, setModerationLoading] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedMessageStudentPk, setSelectedMessageStudentPk] = useState<number | "">("");
   const [messageThread, setMessageThread] = useState<PrivateMessage[]>([]);
@@ -348,6 +358,7 @@ export function TeacherPage() {
   const [aiHttpProxy, setAiHttpProxy] = useState("");
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiSafetyMaxLength, setAiSafetyMaxLength] = useState<number | "">(2000);
+  const [aiModerationEnabled, setAiModerationEnabled] = useState(false);
   const [aiSafetyKeywords, setAiSafetyKeywords] = useState("");
   const [aiKeywordAction, setAiKeywordAction] = useState<"replace" | "block">("replace");
   const [aiDisplayStrategy, setAiDisplayStrategy] = useState<"review_first" | "direct_with_report">("review_first");
@@ -481,16 +492,19 @@ export function TeacherPage() {
     setMessage("访问地址已更新");
   }
 
-  function applyAiOverview(data: AiOverview) {
+  function applyAiOverview(data: AiOverview, resetForm: boolean = true) {
     setAiOverview(data);
-    const provider = data.active_provider ?? data.providers[0];
-    if (provider) {
-      fillAiProviderForm(provider);
+    if (resetForm) {
+      const provider = data.active_provider ?? data.providers[0];
+      if (provider) {
+        fillAiProviderForm(provider);
+      }
     }
     setAiSafetyMaxLength(data.safety.max_length);
     setAiSafetyKeywords(data.safety.blocked_keywords.join("\n"));
     setAiKeywordAction(data.safety.keyword_action);
     setAiDisplayStrategy(data.safety.display_strategy);
+    setAiModerationEnabled(Boolean(data.safety.interaction_moderation_enabled));
   }
 
   function fillAiProviderForm(provider: AiProvider) {
@@ -549,7 +563,11 @@ export function TeacherPage() {
   async function handleCheckAiConnectivity() {
     try {
       const result = await checkAiConnectivity(aiProviderId ? Number(aiProviderId) : undefined);
-      await reloadAiOverview();
+      // 仅刷新概览数据（更新连通性状态/自检记录），不重置当前选中的 Provider，
+      // 避免自检后下拉与表单跳回默认项（如 DeepSeek）
+      const [overview, tasks] = await Promise.all([fetchAiOverview(), fetchAiFailureTasks()]);
+      setAiOverview(overview);
+      setAiFailureTaskCount(tasks.length);
       setMessage(result.message);
     } catch (err) {
       setError((err as Error).message);
@@ -565,7 +583,8 @@ export function TeacherPage() {
           .map((item) => item.trim())
           .filter(Boolean),
         keyword_action: aiKeywordAction,
-        display_strategy: aiDisplayStrategy
+        display_strategy: aiDisplayStrategy,
+        interaction_moderation_enabled: aiModerationEnabled
       });
       await reloadAiOverview();
       setMessage("AI 内容安全策略已保存");
@@ -574,9 +593,39 @@ export function TeacherPage() {
     }
   }
 
+  async function loadModerationLogs(sessionId: number) {
+    try {
+      setModerationLoading(true);
+      setModerationLogs(await fetchModerationLogs(sessionId, "pending"));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setModerationLoading(false);
+    }
+  }
+
+  async function handleReviewModeration(logId: number, approve: boolean) {
+    if (!interactionSessionId) {
+      return;
+    }
+    try {
+      await (approve
+        ? approveModerationLog(Number(interactionSessionId), logId)
+        : rejectModerationLog(Number(interactionSessionId), logId));
+      setMessage(approve ? "发言已放行上墙" : "发言已忽略");
+      await loadModerationLogs(Number(interactionSessionId));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   async function handleCheckAiSafety() {
     try {
-      setAiSafetyResult(await checkAiSafety(aiSafetySample));
+      const keywords = aiSafetyKeywords
+        .split(/[,，;；\n]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      setAiSafetyResult(await checkAiSafety(aiSafetySample, keywords));
       setMessage("内容安全检查已完成");
     } catch (err) {
       setError((err as Error).message);
@@ -1060,6 +1109,31 @@ export function TeacherPage() {
       window.clearInterval(timer);
     };
   }, [isAuthenticated, activeTeacherSection, selectedMessageStudentPk]);
+
+  useEffect(() => {
+    if (activeTeacherSection !== "interaction" || !interactionSessionId) {
+      return undefined;
+    }
+    const sessionId = Number(interactionSessionId);
+    void loadModerationLogs(sessionId);
+    const socket = new TeachingAssistSocket(
+      classroomSocketUrl(sessionId),
+      (event) => {
+        const payload = JSON.parse(event.data) as InteractionModerated;
+        if (payload.type === "interaction.moderated") {
+          setMessage(
+            `学生 ${payload.student_name} 的发言未通过 AI 审核${payload.reason ? "：" + payload.reason : ""}`
+          );
+          void loadModerationLogs(sessionId);
+        }
+      },
+      3000
+    );
+    socket.connect();
+    return () => {
+      socket.close();
+    };
+  }, [activeTeacherSection, interactionSessionId]);
 
   async function handleLoadQuestions(sessionId: number) {
     try {
@@ -1633,6 +1707,27 @@ export function TeacherPage() {
                     <Paper variant="outlined" sx={{ p: 2 }}>
                       <Stack spacing={1.5}>
                         <Typography fontWeight={700}>内容安全</Typography>
+                        <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: "wrap" }}>
+                          <Typography>课堂互动发言 AI 甄别</Typography>
+                          <Switch
+                            checked={aiModerationEnabled}
+                            onChange={async (event) => {
+                              const next = event.target.checked;
+                              setAiModerationEnabled(next);
+                              try {
+                                await toggleModerationEnabled(next);
+                              } catch (err) {
+                                // 回滚 UI 状态
+                                setAiModerationEnabled(!next);
+                                setError((err as Error).message);
+                              }
+                            }}
+                            color="warning"
+                          />
+                          <Typography variant="body2" color="text.secondary">
+                            默认关闭；开启后学生发言先经 AI 甄别，违规将被拦截并仅教师可见
+                          </Typography>
+                        </Stack>
                         <Grid container spacing={1.5}>
                           <Grid item xs={12} sm={4}>
                             <TextField
@@ -3323,6 +3418,43 @@ export function TeacherPage() {
                   学生完成正常或迟到签到后可发言；教师可随时暂停学生发言。
                 </Typography>
               </Box>
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                  <Typography fontWeight={700}>待审核发言（AI 拦截）</Typography>
+                  <Button
+                    size="small"
+                    onClick={() => interactionSessionId && loadModerationLogs(Number(interactionSessionId))}
+                    disabled={!interactionSessionId || moderationLoading}
+                  >
+                    刷新
+                  </Button>
+                </Stack>
+                <Stack spacing={1} sx={{ mt: 1 }}>
+                  {moderationLogs.length === 0 && (
+                    <Typography color="text.secondary">暂无被拦截的发言。</Typography>
+                  )}
+                  {moderationLogs.map((log) => (
+                    <Box key={log.id} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Chip size="small" label="待审核" color="warning" />
+                        <Typography fontWeight={700}>{log.student_name}</Typography>
+                        {log.reason && (
+                          <Typography variant="body2" color="text.secondary">原因：{log.reason}</Typography>
+                        )}
+                      </Stack>
+                      <Typography sx={{ mt: 0.5, whiteSpace: "pre-wrap" }}>{log.content}</Typography>
+                      <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                        <Button size="small" variant="contained" onClick={() => handleReviewModeration(log.id, true)}>
+                          放行上墙
+                        </Button>
+                        <Button size="small" variant="outlined" color="inherit" onClick={() => handleReviewModeration(log.id, false)}>
+                          忽略
+                        </Button>
+                      </Stack>
+                    </Box>
+                  ))}
+                </Stack>
+              </Paper>
               <Grid container spacing={2}>
                 <Grid item xs={12} md={5}>
                   <Stack spacing={1.5}>

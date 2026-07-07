@@ -31,12 +31,14 @@ class SafetySettingsRequest(BaseModel):
     blocked_keywords: list[str] = Field(default_factory=list)
     keyword_action: str = "replace"
     display_strategy: str = "review_first"
+    interaction_moderation_enabled: bool | None = None
 
 
 class SafetyCheckRequest(BaseModel):
     text: str
     source_type: str = "manual_test"
     source_id: int | None = None
+    blocked_keywords: list[str] | None = None
 
 
 class FailureTaskRequest(BaseModel):
@@ -45,6 +47,10 @@ class FailureTaskRequest(BaseModel):
     source_id: int | None = None
     reason: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModerationToggleRequest(BaseModel):
+    enabled: bool
 
 
 @router.get("/overview", response_model=ApiResponse[dict[str, Any]])
@@ -99,7 +105,7 @@ def check_safety(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, Any]]:
     return ok(
-        ai_service.check_content_safety(payload.text, payload.source_type, payload.source_id),
+        ai_service.check_content_safety(payload.text, payload.source_type, payload.source_id, payload.blocked_keywords),
         message="内容安全检查已完成",
     )
 
@@ -123,4 +129,15 @@ def create_failure_task(
             payload.payload,
         ),
         message="AI 降级任务已记录",
+    )
+
+
+@router.put("/safety/moderation", response_model=ApiResponse[dict[str, Any]])
+def toggle_moderation(
+    payload: ModerationToggleRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, Any]]:
+    return ok(
+        ai_service.set_interaction_moderation_enabled(payload.enabled),
+        message=f"课堂互动发言 AI 甄别已{'开启' if payload.enabled else '关闭'}",
     )

@@ -44,6 +44,13 @@ DEGRADATION_STRATEGIES = [
         "affected_features": ["学习建议文本"],
         "base_flow_available": True,
     },
+    {
+        "scenario": "interaction_moderation",
+        "normal_mode": "AI 甄别学生课堂互动发言",
+        "degraded_mode": "跳过发言安全分析，直接放行",
+        "affected_features": ["课堂互动发言 AI 甄别"],
+        "base_flow_available": True,
+    },
 ]
 
 
@@ -259,13 +266,18 @@ def _check_provider_remote(provider: dict[str, Any]) -> tuple[str, str, int]:
         return "unavailable", "AI 自检失败", latency_ms
 
 
-def _post_chat_completion(provider: dict[str, Any], messages: list[dict[str, str]], response_format: dict[str, str] | None = None) -> str:
+def _post_chat_completion(
+    provider: dict[str, Any],
+    messages: list[dict[str, str]],
+    response_format: dict[str, str] | None = None,
+    temperature: float = 0.2,
+) -> str:
     if not provider.get("enabled") or not provider.get("api_key"):
         raise AppError("AI 不可用，系统进入降级模式", code="AI_UNAVAILABLE")
     payload: dict[str, Any] = {
         "model": provider["model_name"],
         "messages": messages,
-        "temperature": 0.2,
+        "temperature": temperature,
     }
     if response_format:
         payload["response_format"] = response_format
@@ -402,23 +414,39 @@ def update_safety_settings(payload: dict[str, Any]) -> dict[str, Any]:
     keywords = [str(item).strip() for item in payload.get("blocked_keywords") or [] if str(item).strip()]
     keywords = sorted(set(keywords))
 
+    moderation_enabled = payload.get("interaction_moderation_enabled")
+    set_clause = (
+        "max_length = ?, blocked_keywords_json = ?, keyword_action = ?, display_strategy = ?, updated_at = datetime('now')"
+    )
+    params: list[Any] = [max_length, json.dumps(keywords, ensure_ascii=False), keyword_action, display_strategy]
+    if moderation_enabled is not None:
+        set_clause += ", interaction_moderation_enabled = ?"
+        params.append(1 if moderation_enabled else 0)
     with get_connection() as connection:
         connection.execute(
-            """
-            UPDATE ai_safety_settings
-            SET max_length = ?, blocked_keywords_json = ?, keyword_action = ?, display_strategy = ?,
-                updated_at = datetime('now')
-            WHERE id = 1
-            """,
-            (max_length, json.dumps(keywords, ensure_ascii=False), keyword_action, display_strategy),
+            f"UPDATE ai_safety_settings SET {set_clause} WHERE id = 1",
+            tuple(params),
         )
         return _load_safety_settings(connection)
 
 
-def check_content_safety(text: str, source_type: str = "manual_test", source_id: int | None = None) -> dict[str, Any]:
+def set_interaction_moderation_enabled(enabled: bool) -> dict[str, Any]:
+    """即时切换课堂互动发言 AI 甄别开关（无需保存整个策略表单）。"""
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE ai_safety_settings SET interaction_moderation_enabled = ?, updated_at = datetime('now') WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        return _load_safety_settings(connection)
+
+
+def check_content_safety(text: str, source_type: str = "manual_test", source_id: int | None = None, blocked_keywords: list[str] | None = None) -> dict[str, Any]:
     original = str(text or "")
     with get_connection() as connection:
         settings = _load_safety_settings(connection)
+
+    # 前端传入的关键词优先（支持未保存时直接测试）；否则用数据库持久化值
+    keywords = blocked_keywords if blocked_keywords is not None else settings["blocked_keywords"]
 
     sanitized = original
     matched_keywords: list[str] = []
@@ -428,7 +456,7 @@ def check_content_safety(text: str, source_type: str = "manual_test", source_id:
         sanitized = sanitized[:max_length]
         action = "truncate"
 
-    for keyword in settings["blocked_keywords"]:
+    for keyword in keywords:
         pattern = re.compile(re.escape(str(keyword)), re.IGNORECASE)
         if pattern.search(sanitized):
             matched_keywords.append(str(keyword))
@@ -469,6 +497,50 @@ def check_content_safety(text: str, source_type: str = "manual_test", source_id:
         "display_strategy": settings["display_strategy"],
         "message": "AI 反馈内容异常，请联系教师" if blocked else "内容安全检查通过",
     }
+
+
+def moderate_content(text: str) -> dict[str, Any]:
+    """用 AI 对学生课堂互动发言做语义甄别（替代关键词敏感词方案）。
+
+    返回 {"safe": bool, "reason": str}。
+    AI 不可用（未配置/未启用/无 key/调用失败）时抛 AppError(code=AI_MODERATION_UNAVAILABLE)，
+    由调用方兜底放行。
+    """
+    original = str(text or "").strip()
+    if not original:
+        return {"safe": True, "reason": ""}
+    with get_connection() as connection:
+        provider = _active_provider(connection)
+    if provider is None or not provider.get("enabled") or not provider.get("api_key"):
+        raise AppError("AI 甄别服务不可用", code="AI_MODERATION_UNAVAILABLE")
+
+    prompt = (
+        "你是高校课堂互动内容审核助手。请判断学生发送的课堂互动留言是否包含"
+        "辱骂、人身攻击、色情、暴力、违法违规、严重刷屏或明显偏离课堂的不当内容。\n"
+        "正常的学习提问、讨论、闲聊均视为合规。\n"
+        "只输出合法 JSON，格式：{\"safe\": true 或 false, \"reason\": \"简短理由，合规时为空字符串\"}。\n"
+        f"待审核内容：{original}"
+    )
+    try:
+        content = _post_chat_completion(
+            provider,
+            [
+                {"role": "system", "content": "你是内容安全审核助手，只输出合法 JSON，不要输出任何解释。"},
+                {"role": "user", "content": prompt},
+            ],
+            {"type": "json_object"},
+            temperature=0,
+        )
+        parsed = json.loads(content)
+        return {
+            "safe": bool(parsed.get("safe", True)),
+            "reason": str(parsed.get("reason") or "").strip(),
+        }
+    except AppError:
+        raise
+    except Exception as exc:
+        logger.warning("AI 发言甄别调用失败：%s", exc)
+        raise AppError("AI 甄别服务调用失败", code="AI_MODERATION_UNAVAILABLE") from exc
 
 
 def record_failure_task(

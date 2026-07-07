@@ -22,6 +22,7 @@ export interface AiSafetySettings {
   blocked_keywords: string[];
   keyword_action: "replace" | "block";
   display_strategy: "review_first" | "direct_with_report";
+  interaction_moderation_enabled: boolean;
   updated_at: string;
 }
 
@@ -134,13 +135,20 @@ export function updateAiSafety(settings: Omit<AiSafetySettings, "id" | "updated_
   });
 }
 
-export function checkAiSafety(text: string) {
+export function checkAiSafety(text: string, keywords?: string[]) {
   return request<AiSafetyCheckResult>("/ai/safety/check", {
     method: "POST",
-    body: JSON.stringify({ text, source_type: "manual_test" })
+    body: JSON.stringify({ text, source_type: "manual_test", blocked_keywords: keywords })
   });
 }
 
 export function fetchAiFailureTasks() {
   return request<AiFailureTask[]>("/ai/failure-tasks");
+}
+
+export function toggleModerationEnabled(enabled: boolean) {
+  return request<AiSafetySettings>("/ai/safety/moderation", {
+    method: "PUT",
+    body: JSON.stringify({ enabled })
+  });
 }
