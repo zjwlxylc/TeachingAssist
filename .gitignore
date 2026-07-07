@@ -11,6 +11,9 @@ frontend/.vite/
 # Runtime and local data
 .runtime/
 *.log
+*.db
+*.sqlite
+*.sqlite3
 config/local.yaml
 
 # OS/editor
