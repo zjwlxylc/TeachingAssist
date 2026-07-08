@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Card,
@@ -153,6 +154,7 @@ import {
 } from "../api/evaluation";
 import {
   InteractionMessage,
+  InteractionMessageCreated,
   InteractionModerated,
   InteractionModerationLog,
   InteractionSettings,
@@ -260,6 +262,15 @@ const TEACHER_SECTIONS: Array<{ key: TeacherSectionKey; label: string; descripti
   { key: "messages", label: "私信", description: "学生私聊、回复" }
 ];
 
+/** 在课堂列表中挑选“默认进入”的课堂：优先进行中（status=active）且 id 最大的课堂，
+ *  没有进行中的课堂时回退到 id 最大的课堂，避免老师进入模块还要先手动选择。 */
+function pickDefaultSessionId(list: ClassroomSession[]): number | "" {
+  if (!list.length) return "";
+  const active = list.filter((s) => s.status === "active");
+  const pool = active.length ? active : list;
+  return pool.reduce((best, s) => (s.id > best.id ? s : best)).id;
+}
+
 export function TeacherPage() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [startup, setStartup] = useState<StartupStatus | null>(null);
@@ -316,6 +327,7 @@ export function TeacherPage() {
   const [messageThreadStudent, setMessageThreadStudent] = useState<ThreadStudent | null>(null);
   const [messageReplyContent, setMessageReplyContent] = useState("");
   const [messageUnreadTotal, setMessageUnreadTotal] = useState(0);
+  const [interactionUnread, setInteractionUnread] = useState(0);
   const messageSocketRef = useRef<TeachingAssistSocket | null>(null);
   const [questionSessionId, setQuestionSessionId] = useState<number | "">("");
   const [questionTitle, setQuestionTitle] = useState("");
@@ -377,6 +389,10 @@ export function TeacherPage() {
   const [confirmError, setConfirmError] = useState("");
   const [previewing, setPreviewing] = useState(false);
   const [activeTeacherSection, setActiveTeacherSection] = useState<TeacherSectionKey>("system");
+  const activeTeacherSectionRef = useRef<TeacherSectionKey>(activeTeacherSection);
+  useEffect(() => {
+    activeTeacherSectionRef.current = activeTeacherSection;
+  }, [activeTeacherSection]);
   const { isAuthenticated, setTeacherSession, logout: clearSession } = useAuthStore();
 
   /** Session status: raw English → Chinese label */
@@ -1110,8 +1126,10 @@ export function TeacherPage() {
     };
   }, [isAuthenticated, activeTeacherSection, selectedMessageStudentPk]);
 
+  // 课堂互动 WebSocket：只要已选定互动课堂（无论是否停留在互动模块）就保持监听，
+  // 这样老师不在互动模块时也能通过左栏红点感知新留言。
   useEffect(() => {
-    if (activeTeacherSection !== "interaction" || !interactionSessionId) {
+    if (!interactionSessionId) {
       return undefined;
     }
     const sessionId = Number(interactionSessionId);
@@ -1119,8 +1137,12 @@ export function TeacherPage() {
     const socket = new TeachingAssistSocket(
       classroomSocketUrl(sessionId),
       (event) => {
-        const payload = JSON.parse(event.data) as InteractionModerated;
-        if (payload.type === "interaction.moderated") {
+        const payload = JSON.parse(event.data) as InteractionMessageCreated | InteractionModerated;
+        if (payload.type === "interaction.message.created") {
+          if (activeTeacherSectionRef.current !== "interaction") {
+            setInteractionUnread((current) => current + 1);
+          }
+        } else if (payload.type === "interaction.moderated") {
           setMessage(
             `学生 ${payload.student_name} 的发言未通过 AI 审核${payload.reason ? "：" + payload.reason : ""}`
           );
@@ -1133,7 +1155,60 @@ export function TeacherPage() {
     return () => {
       socket.close();
     };
-  }, [activeTeacherSection, interactionSessionId]);
+  }, [interactionSessionId]);
+
+  // 全局轮询私信未读总数：使左栏「私信」红点实时反映服务端未读，
+  // 不依赖是否停留在私信模块（进入模块读取会话后会自动回落）。
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const unread = await fetchUnreadCount();
+        if (!disposed) setMessageUnreadTotal(unread.unread_count);
+      } catch {
+        /* 忽略瞬时网络错误 */
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 15000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [isAuthenticated]);
+
+  // 进入「课堂问答 / 课堂作业 / 学习评估 / 课堂公告 / 课堂互动」时，若尚未选择课堂，
+  // 自动默认到最新进行中的课堂并加载数据，减少老师手动选择的操作步骤。
+  // 已手动选过课堂的模块不会被覆盖（对应 sessionId 非空时跳过）。
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const target = pickDefaultSessionId(sessions);
+    if (target === "") return;
+    if (activeTeacherSection === "questions" && questionSessionId === "") {
+      void handleLoadQuestions(target);
+    } else if (activeTeacherSection === "homework" && homeworkSessionId === "") {
+      void handleLoadHomework(target);
+    } else if (activeTeacherSection === "evaluation" && evaluationSessionId === "") {
+      void handleLoadEvaluation(target);
+    } else if (activeTeacherSection === "announcements" && announcementSessionId === "") {
+      void handleLoadAnnouncements(target);
+    } else if (activeTeacherSection === "interaction" && interactionSessionId === "") {
+      void handleLoadInteraction(target);
+    } else if (interactionSessionId === "") {
+      // 登录即预选默认互动课堂，使红点提醒能从课堂开始时就监听最新开课课堂的留言
+      void handleLoadInteraction(target);
+    }
+  }, [
+    isAuthenticated,
+    activeTeacherSection,
+    sessions,
+    questionSessionId,
+    homeworkSessionId,
+    evaluationSessionId,
+    announcementSessionId,
+    interactionSessionId
+  ]);
 
   async function handleLoadQuestions(sessionId: number) {
     try {
@@ -1524,21 +1599,11 @@ export function TeacherPage() {
             }}
           >
             <Stack spacing={0.75}>
-              {TEACHER_SECTIONS.map((section) => (
-                <Button
-                  key={section.key}
-                  fullWidth
-                  variant={activeTeacherSection === section.key ? "contained" : "text"}
-                  onClick={() => setActiveTeacherSection(section.key)}
-                  sx={{
-                    justifyContent: "flex-start",
-                    alignItems: "flex-start",
-                    textAlign: "left",
-                    py: 1,
-                    px: 1.25,
-                    minHeight: 58
-                  }}
-                >
+              {TEACHER_SECTIONS.map((section) => {
+                const unread =
+                  section.key === "messages" ? messageUnreadTotal :
+                  section.key === "interaction" ? interactionUnread : 0;
+                const labelNode = (
                   <Box>
                     <Typography component="span" sx={{ display: "block", fontWeight: 700, lineHeight: 1.3 }}>
                       {section.label}
@@ -1547,8 +1612,35 @@ export function TeacherPage() {
                       {section.description}
                     </Typography>
                   </Box>
-                </Button>
-              ))}
+                );
+                return (
+                  <Button
+                    key={section.key}
+                    fullWidth
+                    variant={activeTeacherSection === section.key ? "contained" : "text"}
+                    onClick={() => {
+                      setActiveTeacherSection(section.key);
+                      if (section.key === "interaction") setInteractionUnread(0);
+                    }}
+                    sx={{
+                      justifyContent: "flex-start",
+                      alignItems: "flex-start",
+                      textAlign: "left",
+                      py: 1,
+                      px: 1.25,
+                      minHeight: 58
+                    }}
+                  >
+                    {unread > 0 ? (
+                      <Badge badgeContent={unread} color="error" max={99} sx={{ width: "100%" }}>
+                        {labelNode}
+                      </Badge>
+                    ) : (
+                      labelNode
+                    )}
+                  </Button>
+                );
+              })}
             </Stack>
           </Paper>
 

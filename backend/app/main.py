@@ -2,8 +2,9 @@ import logging
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
@@ -39,7 +40,26 @@ def create_app() -> FastAPI:
 
     frontend_dist = PROJECT_ROOT / "frontend" / "dist"
     if frontend_dist.exists():
-        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+        # 生产模式：直接托管前端构建产物，并支持 SPA 历史路由刷新回退。
+        # 任意 GET 路径若对应真实文件则直接返回；否则（前端路由，如 /student）
+        # 回退到 index.html，避免在子路由刷新时返回 404 {"detail":"Not Found"}。
+        base = frontend_dist.resolve()
+
+        @app.get("/")
+        async def serve_root():
+            return FileResponse(frontend_dist / "index.html")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str):
+            if not full_path.startswith("api/"):
+                candidate = (base / full_path).resolve()
+                # 防路径穿越：仅当解析后仍在 frontend_dist 内且为真实文件时才返回
+                if candidate.is_relative_to(base) and candidate.is_file():
+                    return FileResponse(candidate)
+                # 前端路由（刷新时浏览器直接请求该路径）：回退到 index.html
+                return FileResponse(frontend_dist / "index.html")
+            # /api 下未匹配的路径保持原 404 行为
+            raise HTTPException(status_code=404, detail="Not Found")
     else:
         static_dir = Path(__file__).parent / "static"
         static_dir.mkdir(exist_ok=True)

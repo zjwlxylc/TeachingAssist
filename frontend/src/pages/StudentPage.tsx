@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Card,
@@ -111,6 +112,33 @@ const SIGN_IN_STATUS_LABELS: Record<string, string> = {
   leave: "请假"
 };
 
+type StudentSectionKey =
+  | "signin"
+  | "announcements"
+  | "questions"
+  | "interaction"
+  | "homework"
+  | "feedback"
+  | "messages";
+
+const STUDENT_SECTIONS: Array<{ key: StudentSectionKey; label: string; description: string }> = [
+  { key: "signin", label: "课堂签到", description: "填写身份、选择课堂并签到" },
+  { key: "announcements", label: "课堂公告", description: "教师发布的正式通知" },
+  { key: "questions", label: "课堂问答", description: "作答题目、查看判分" },
+  { key: "interaction", label: "课堂互动", description: "全班可见的自由留言" },
+  { key: "homework", label: "课堂作业", description: "查看与提交作业" },
+  { key: "feedback", label: "学习反馈", description: "查看个人课堂评估" },
+  { key: "messages", label: "私信老师", description: "与老师一对一对话" },
+];
+
+function StudentSectionPlaceholder({ label }: { label: string }) {
+  return (
+    <Alert severity="info">
+      请先在左侧「签到」中完成课堂签到，再查看「{label}」。
+    </Alert>
+  );
+}
+
 export function StudentPage() {
   const [activeSessions, setActiveSessions] = useState<ClassroomSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<number | "">("");
@@ -120,6 +148,9 @@ export function StudentPage() {
   const [name, setName] = useState("");
   const [result, setResult] = useState<StudentSignInResult | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementUnread, setAnnouncementUnread] = useState(0);
+  const [interactionUnread, setInteractionUnread] = useState(0);
+  const [messagesUnread, setMessagesUnread] = useState(0);
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
@@ -141,9 +172,15 @@ export function StudentPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [snackError, setSnackError] = useState("");
+  const [activeStudentSection, setActiveStudentSection] = useState<StudentSectionKey>("signin");
+  const activeStudentSectionRef = useRef<StudentSectionKey>("signin");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
   const lastAnnouncementIdRef = useRef(0);
   const lastInteractionMessageIdRef = useRef(0);
+
+  useEffect(() => {
+    activeStudentSectionRef.current = activeStudentSection;
+  }, [activeStudentSection]);
 
   useEffect(() => {
     loadActiveSessions();
@@ -154,6 +191,7 @@ export function StudentPage() {
     socketRef.current?.close();
     socketRef.current = null;
     setAnnouncements([]);
+    setAnnouncementUnread(0);
     setInteractionMessages([]);
     setInteractionSettings(null);
     setQuestions([]);
@@ -222,10 +260,18 @@ export function StudentPage() {
         const payload = JSON.parse(event.data) as ClassroomMessage;
         if (payload.type === "announcement.created") {
           mergeAnnouncements([payload.announcement]);
-          setMessage("收到新的课堂公告");
+          const content = payload.announcement.content ?? "";
+          const preview = content.length > 40 ? `${content.slice(0, 40)}…` : content;
+          setMessage(preview ? `收到新公告：${preview}` : "收到新的课堂公告");
+          if (activeStudentSectionRef.current !== "announcements") {
+            setAnnouncementUnread((current) => current + 1);
+          }
         }
         if (payload.type === "interaction.message.created") {
           mergeInteractionMessages([payload.message]);
+          if (activeStudentSectionRef.current !== "interaction") {
+            setInteractionUnread((current) => current + 1);
+          }
         }
         if (payload.type === "interaction.settings.updated") {
           setInteractionSettings(payload.settings);
@@ -293,6 +339,9 @@ export function StudentPage() {
         if (payload.type === "message.created" && payload.message.receiver_role === "student") {
           mergePrivateMessages([payload.message]);
           setMessage("老师回复了你的私信");
+          if (activeStudentSectionRef.current !== "messages") {
+            setMessagesUnread((current) => current + 1);
+          }
         }
       },
       3000
@@ -697,364 +746,449 @@ export function StudentPage() {
   }, [result]);
 
   return (
-    <Stack spacing={3}>
-      {/* 页面标题（状态信息已移至全局标题栏，见 AppLayout） */}
-      <Typography variant="h1">学生签到</Typography>
-
-      {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
-
-      <Card sx={{ maxWidth: 640 }}>
-        <CardContent>
-          <Stack spacing={2}>
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-              <FormControl fullWidth>
-                <InputLabel id="active-session-label">活动课堂</InputLabel>
-                <Select
-                  labelId="active-session-label"
-                  label="活动课堂"
-                  value={selectedSessionId}
-                  onChange={(event) => loadSession(Number(event.target.value))}
-                >
-                  {activeSessions.map((session) => (
-                    <MenuItem key={session.id} value={session.id}>
-                      #{session.id} {session.course_name} / {session.class_name} / {session.title}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadActiveSessions}>
-                刷新
-              </Button>
-            </Stack>
-
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-              <TextField
-                label="课堂 ID"
-                value={sessionIdInput}
-                onChange={(event) => setSessionIdInput(event.target.value)}
-                fullWidth
-              />
-              <Button variant="outlined" onClick={() => loadSession(Number(sessionIdInput))}>
-                查询
-              </Button>
-            </Stack>
-
-            {currentSession && (
-              <Alert severity={currentSession.status === "active" ? "success" : "warning"}>
-                {currentSession.course_name} / {currentSession.class_name} / {currentSession.title}：
-                <Chip size="small" label={currentSession.status} sx={{ ml: 1 }} />
-                {cachedCount > 0 && <Chip size="small" color="warning" label={`待重发 ${cachedCount}`} sx={{ ml: 1 }} />}
-              </Alert>
-            )}
-
-            <TextField label="学号" value={studentId} onChange={(event) => setStudentId(event.target.value)} fullWidth />
-            <TextField label="姓名" value={name} onChange={(event) => setName(event.target.value)} fullWidth />
-            <Button variant="contained" startIcon={<LoginIcon />} onClick={handleSignIn}>
-              提交签到
-            </Button>
-
-            {result && (
-              <Stack spacing={1}>
-                <Alert severity={result.status === "late" ? "warning" : "success"}>
-                  {result.student_number} / {result.student_name} / {SIGN_IN_STATUS_LABELS[result.status] ?? result.status}
-                  {result.sign_time ? ` / ${result.sign_time}` : ""}
-                </Alert>
-                {result.device_warning && (
-                  <Alert severity={result.device_warning.level === "critical" ? "error" : "warning"}>
-                    ⚠️ 设备共用警告：{result.device_warning.message}
-                  </Alert>
-                )}
-              </Stack>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Box>
-              <Typography variant="h2">私信老师</Typography>
-              <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-                与老师的 1:1 私聊，仅你和老师可见。填写学号和姓名后即可收发，无需进入课堂。
-              </Typography>
-            </Box>
-            {privateMessages.map((item) => (
-              <Box
-                key={item.id}
-                sx={{ display: "flex", justifyContent: item.sender_role === "student" ? "flex-end" : "flex-start" }}
-              >
-                <Paper
-                  variant="outlined"
-                  sx={{
-                    p: 1.5,
-                    maxWidth: "80%",
-                    bgcolor: item.sender_role === "student" ? "primary.main" : "background.paper",
-                    color: item.sender_role === "student" ? "primary.contrastText" : "text.primary",
-                  }}
-                >
-                  <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-                  <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
-                    {item.sender_role === "teacher" ? "老师" : "我"} · {item.created_at}
-                  </Typography>
-                </Paper>
-              </Box>
-            ))}
-            {privateMessages.length === 0 && (
-              <Typography color="text.secondary">还没有私信，给老师发一条吧。</Typography>
-            )}
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-              <TextField
-                label="私信内容"
-                value={privateContent}
-                onChange={(event) => setPrivateContent(event.target.value)}
-                helperText={`${privateContent.length}/500`}
-                inputProps={{ maxLength: 500 }}
-                fullWidth
-              />
-              <Button
-                variant="contained"
-                startIcon={<SendIcon />}
-                onClick={handleSendPrivateMessage}
-                disabled={!studentId || !name}
-                sx={{ minWidth: 120 }}
-              >
-                发送
-              </Button>
-            </Stack>
-            {(!studentId || !name) && (
-              <Alert severity="info">请先在上方填写学号和姓名，即可与老师私信。</Alert>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-            <Typography variant="h2">课堂公告</Typography>
-            {announcements.map((item) => (
-              <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                <Typography>{item.content}</Typography>
-                <Typography color="text.secondary" variant="body2">
-                  {item.sender_name} / {item.created_at}
+    <Box
+      sx={{
+        display: "grid",
+        gridTemplateColumns: { xs: "1fr", md: "260px minmax(0, 1fr)" },
+        gap: 2,
+        alignItems: "start",
+      }}
+    >
+      <Paper
+        variant="outlined"
+        sx={{
+          position: { xs: "static", md: "sticky" },
+          top: { md: 16 },
+          p: 1,
+          maxHeight: { md: "calc(100vh - 120px)" },
+          overflow: "auto",
+        }}
+      >
+        <Stack spacing={0.75}>
+          {STUDENT_SECTIONS.map((section) => {
+            const unread =
+              section.key === "announcements" ? announcementUnread :
+              section.key === "interaction" ? interactionUnread :
+              section.key === "messages" ? messagesUnread : 0;
+            const labelNode = (
+              <Box>
+                <Typography component="span" sx={{ display: "block", fontWeight: 700, lineHeight: 1.3 }}>
+                  {section.label}
+                </Typography>
+                <Typography component="span" sx={{ display: "block", fontSize: "0.75rem", opacity: 0.78, lineHeight: 1.4 }}>
+                  {section.description}
                 </Typography>
               </Box>
-            ))}
-            {announcements.length === 0 && (
-              <Typography color="text.secondary">进入课堂后可查看教师发布的公告。</Typography>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Box>
-              <Typography variant="h2">课堂互动</Typography>
-              <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-                完成签到后可参与课堂留言，全班可见。
-              </Typography>
-            </Box>
-            {interactionMessages.map((item) => (
-              <Paper key={item.id} variant="outlined" sx={{ p: 1.5 }}>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                  <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
-                  <Typography fontWeight={700}>{item.sender_name}</Typography>
-                  <Typography color="text.secondary" variant="body2">
-                    {item.created_at}
-                  </Typography>
-                </Stack>
-                <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-              </Paper>
-            ))}
-            {interactionMessages.length === 0 && (
-              <Typography color="text.secondary">暂无课堂互动留言。</Typography>
-            )}
-            {!result && <Alert severity="info">完成签到后可参与课堂互动。</Alert>}
-            {result && !Boolean(interactionSettings?.student_messages_enabled ?? true) && (
-              <Alert severity="warning">教师已暂停课堂互动发言，你仍可查看已有留言。</Alert>
-            )}
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-              <TextField
-                label="互动留言"
-                value={interactionContent}
-                onChange={(event) => setInteractionContent(event.target.value)}
-                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true)}
-                helperText={`${interactionContent.length}/300`}
-                inputProps={{ maxLength: 300 }}
-                fullWidth
-              />
+            );
+            return (
               <Button
-                variant="contained"
-                startIcon={<SendIcon />}
-                onClick={handleSendInteractionMessage}
-                disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true) || sendingInteraction}
-                sx={{ minWidth: 120 }}
+                key={section.key}
+                fullWidth
+                variant={activeStudentSection === section.key ? "contained" : "text"}
+                onClick={() => {
+                  setActiveStudentSection(section.key);
+                  if (section.key === "announcements") setAnnouncementUnread(0);
+                  if (section.key === "interaction") setInteractionUnread(0);
+                  if (section.key === "messages") setMessagesUnread(0);
+                }}
+                sx={{
+                  justifyContent: "flex-start",
+                  alignItems: "flex-start",
+                  textAlign: "left",
+                  py: 1,
+                  px: 1.25,
+                  minHeight: 58,
+                }}
               >
-                {sendingInteraction ? "审核中…" : "发送"}
+                {unread > 0 ? (
+                  <Badge badgeContent={unread} color="error" max={99} sx={{ width: "100%" }}>
+                    {labelNode}
+                  </Badge>
+                ) : (
+                  labelNode
+                )}
               </Button>
-            </Stack>
-          </Stack>
-        </CardContent>
-      </Card>
+            );
+          })}
+        </Stack>
+      </Paper>
 
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Typography variant="h2">课堂问答</Typography>
-            {questions.map((question) => (
-              <Paper key={question.id} variant="outlined" sx={{ p: 2 }}>
-                <Stack spacing={1.5}>
-                  <Box>
-                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                      <Typography fontWeight={700}>{question.title}</Typography>
-                      <Chip size="small" label={QUESTION_TYPE_LABELS[question.question_type]} />
-                      {submittedQuestions[question.id] && <Chip size="small" color="success" label="已提交" />}
-                    </Stack>
-                    <Typography sx={{ mt: 0.75 }}>{question.content}</Typography>
-                    {question.deadline && (
-                      <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
-                        截止时间：{question.deadline}
-                      </Typography>
-                    )}
-                  </Box>
-                  {renderAnswerInput(question)}
-                  <Button
-                    variant="contained"
-                    startIcon={<SendIcon />}
-                    onClick={() => handleSubmitAnswer(question)}
-                    disabled={Boolean(submittedQuestions[question.id])}
-                  >
-                    提交答案
-                  </Button>
-                  <Button variant="outlined" onClick={() => handleSaveDraft(question)} disabled={Boolean(submittedQuestions[question.id])}>
-                    保存草稿
-                  </Button>
-                </Stack>
-              </Paper>
-            ))}
-            {questions.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的问题。</Typography>}
-          </Stack>
-        </CardContent>
-      </Card>
+      <Stack spacing={3} sx={{ minWidth: 0 }}>
+        {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
 
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <AssignmentIcon color="primary" />
-              <Typography variant="h2">课堂作业</Typography>
-            </Stack>
-            {homeworkList.map((homework) => {
-              const submitted = submittedHomework[homework.id];
-              const selectedFiles = homeworkFiles[homework.id] ?? [];
-              return (
-                <Paper key={homework.id} variant="outlined" sx={{ p: 2 }}>
-                  <Stack spacing={1.5}>
-                    <Box>
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                        <Typography fontWeight={700}>{homework.title}</Typography>
-                        <Chip size="small" label={homework.status} />
-                        {submitted && (
-                          <Chip
-                            size="small"
-                            color={submitted.status === "late" ? "warning" : "success"}
-                            label={`已提交 v${submitted.submit_version}`}
-                          />
-                        )}
-                      </Stack>
-                      <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
-                        截止时间：{homework.deadline}
-                        {homework.allow_late ? "，允许迟交" : ""}
-                      </Typography>
-                      {homework.description && <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{homework.description}</Typography>}
-                      {homework.grading_criteria && (
-                        <Typography color="text.secondary" variant="body2" sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>
-                          评分标准：{homework.grading_criteria}
-                        </Typography>
-                      )}
-                      {homework.attachments?.length > 0 && (
-                        <Stack spacing={0.25} sx={{ mt: 0.75 }}>
-                          {homework.attachments.map((file) => (
-                            <Typography key={file.id} color="text.secondary" variant="body2">
-                              教师附件：{file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
-                            </Typography>
-                          ))}
-                        </Stack>
-                      )}
-                    </Box>
+        {activeStudentSection === "signin" && (
+          <Box>
+            <Typography variant="h1" sx={{ mb: 2 }}>课堂签到</Typography>
+            <Card sx={{ maxWidth: 640 }}>
+              <CardContent>
+                <Stack spacing={2}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                    <FormControl fullWidth>
+                      <InputLabel id="active-session-label">活动课堂</InputLabel>
+                      <Select
+                        labelId="active-session-label"
+                        label="活动课堂"
+                        value={selectedSessionId}
+                        onChange={(event) => loadSession(Number(event.target.value))}
+                      >
+                        {activeSessions.map((session) => (
+                          <MenuItem key={session.id} value={session.id}>
+                            #{session.id} {session.course_name} / {session.class_name} / {session.title}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadActiveSessions}>
+                      刷新
+                    </Button>
+                  </Stack>
+
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
                     <TextField
-                      label="提交内容"
-                      value={homeworkText[homework.id] ?? ""}
-                      onChange={(event) =>
-                        setHomeworkText((current) => ({ ...current, [homework.id]: event.target.value }))
-                      }
-                      multiline
-                      minRows={3}
+                      label="课堂 ID"
+                      value={sessionIdInput}
+                      onChange={(event) => setSessionIdInput(event.target.value)}
                       fullWidth
                     />
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ xs: "stretch", sm: "center" }}>
-                      <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>
-                        选择附件
-                        <input
-                          type="file"
-                          multiple
-                          hidden
-                          onChange={(event) => updateHomeworkFiles(homework.id, event.target.files)}
-                        />
-                      </Button>
-                      <Typography color="text.secondary" variant="body2">
-                        {selectedFiles.length > 0
-                          ? selectedFiles.map((file) => file.name).join("，")
-                          : "支持 doc、pdf、zip、txt、图片等常见格式"}
-                      </Typography>
-                    </Stack>
-                    <Button variant="contained" startIcon={<SendIcon />} onClick={() => handleSubmitHomework(homework)}>
-                      {submitted ? "再次提交" : "提交作业"}
+                    <Button variant="outlined" onClick={() => loadSession(Number(sessionIdInput))}>
+                      查询
                     </Button>
-                    <Button variant="outlined" onClick={() => handleLoadHomeworkFeedback(homework)}>
-                      查看反馈
-                    </Button>
-                    {homeworkFeedback[homework.id] && (
-                      <Alert severity={homeworkFeedback[homework.id].published ? "success" : "info"}>
-                        {homeworkFeedback[homework.id].published
-                          ? `得分 ${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_score ?? "-")}：${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_feedback ?? "")}`
-                          : "教师尚未发布成绩"}
-                      </Alert>
-                    )}
                   </Stack>
-                </Paper>
-              );
-            })}
-            {homeworkList.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的作业。</Typography>}
-          </Stack>
-        </CardContent>
-      </Card>
 
-      <Card sx={{ maxWidth: 760 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Typography variant="h2">学习反馈</Typography>
-            <Button variant="outlined" onClick={handleLoadEvaluationFeedback}>
-              查看课堂评估
-            </Button>
-            {evaluationFeedback?.evaluation ? (
-              <Alert severity="info">
-                总分 {String((evaluationFeedback.evaluation as Record<string, unknown>).total_score)}，
-                等级 {String((evaluationFeedback.evaluation as Record<string, unknown>).level)}：
-                {String((evaluationFeedback.evaluation as Record<string, unknown>).advice ?? "")}
-              </Alert>
-            ) : (
-              <Typography color="text.secondary">教师生成评估后可查看个人课堂反馈。</Typography>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
+                  {currentSession && (
+                    <Alert severity={currentSession.status === "active" ? "success" : "warning"}>
+                      {currentSession.course_name} / {currentSession.class_name} / {currentSession.title}：
+                      <Chip size="small" label={currentSession.status} sx={{ ml: 1 }} />
+                      {cachedCount > 0 && <Chip size="small" color="warning" label={`待重发 ${cachedCount}`} sx={{ ml: 1 }} />}
+                    </Alert>
+                  )}
 
-      <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
-      <AppSnackbar open={Boolean(snackError)} message={snackError} severity="error" onClose={() => setSnackError("")} />
-    </Stack>
+                  <TextField label="学号" value={studentId} onChange={(event) => setStudentId(event.target.value)} fullWidth />
+                  <TextField label="姓名" value={name} onChange={(event) => setName(event.target.value)} fullWidth />
+                  <Button variant="contained" startIcon={<LoginIcon />} onClick={handleSignIn}>
+                    提交签到
+                  </Button>
+
+                  {result && (
+                    <Stack spacing={1}>
+                      <Alert severity={result.status === "late" ? "warning" : "success"}>
+                        {result.student_number} / {result.student_name} / {SIGN_IN_STATUS_LABELS[result.status] ?? result.status}
+                        {result.sign_time ? ` / ${result.sign_time}` : ""}
+                      </Alert>
+                      {result.device_warning && (
+                        <Alert severity={result.device_warning.level === "critical" ? "error" : "warning"}>
+                          ⚠️ 设备共用警告：{result.device_warning.message}
+                        </Alert>
+                      )}
+                    </Stack>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+          </Box>
+        )}
+
+        {activeStudentSection === "announcements" && (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Typography variant="h2">课堂公告</Typography>
+                  {announcements.map((item) => (
+                    <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                      <Typography>{item.content}</Typography>
+                      <Typography color="text.secondary" variant="body2">
+                        {item.sender_name} / {item.created_at}
+                      </Typography>
+                    </Box>
+                  ))}
+                  {announcements.length === 0 && (
+                    <Typography color="text.secondary">进入课堂后可查看教师发布的公告。</Typography>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
+        {activeStudentSection === "questions" && (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Typography variant="h2">课堂问答</Typography>
+                  {questions.map((question) => (
+                    <Paper key={question.id} variant="outlined" sx={{ p: 2 }}>
+                      <Stack spacing={1.5}>
+                        <Box>
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <Typography fontWeight={700}>{question.title}</Typography>
+                            <Chip size="small" label={QUESTION_TYPE_LABELS[question.question_type]} />
+                            {submittedQuestions[question.id] && <Chip size="small" color="success" label="已提交" />}
+                          </Stack>
+                          <Typography sx={{ mt: 0.75 }}>{question.content}</Typography>
+                          {question.deadline && (
+                            <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
+                              截止时间：{question.deadline}
+                            </Typography>
+                          )}
+                        </Box>
+                        {renderAnswerInput(question)}
+                        <Button
+                          variant="contained"
+                          startIcon={<SendIcon />}
+                          onClick={() => handleSubmitAnswer(question)}
+                          disabled={Boolean(submittedQuestions[question.id])}
+                        >
+                          提交答案
+                        </Button>
+                        <Button variant="outlined" onClick={() => handleSaveDraft(question)} disabled={Boolean(submittedQuestions[question.id])}>
+                          保存草稿
+                        </Button>
+                      </Stack>
+                    </Paper>
+                  ))}
+                  {questions.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的问题。</Typography>}
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
+        {activeStudentSection === "interaction" && (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Box>
+                    <Typography variant="h2">课堂互动</Typography>
+                    <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                      完成签到后可参与课堂留言，全班可见。
+                    </Typography>
+                  </Box>
+                  {interactionMessages.map((item) => (
+                    <Paper key={item.id} variant="outlined" sx={{ p: 1.5 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
+                        <Typography fontWeight={700}>{item.sender_name}</Typography>
+                        <Typography color="text.secondary" variant="body2">
+                          {item.created_at}
+                        </Typography>
+                      </Stack>
+                      <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+                    </Paper>
+                  ))}
+                  {interactionMessages.length === 0 && (
+                    <Typography color="text.secondary">暂无课堂互动留言。</Typography>
+                  )}
+                  {!result && <Alert severity="info">完成签到后可参与课堂互动。</Alert>}
+                  {result && !Boolean(interactionSettings?.student_messages_enabled ?? true) && (
+                    <Alert severity="warning">教师已暂停课堂互动发言，你仍可查看已有留言。</Alert>
+                  )}
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                    <TextField
+                      label="互动留言"
+                      value={interactionContent}
+                      onChange={(event) => setInteractionContent(event.target.value)}
+                      disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true)}
+                      helperText={`${interactionContent.length}/300`}
+                      inputProps={{ maxLength: 300 }}
+                      fullWidth
+                    />
+                    <Button
+                      variant="contained"
+                      startIcon={<SendIcon />}
+                      onClick={handleSendInteractionMessage}
+                      disabled={!result || !Boolean(interactionSettings?.student_messages_enabled ?? true) || sendingInteraction}
+                      sx={{ minWidth: 120 }}
+                    >
+                      {sendingInteraction ? "审核中…" : "发送"}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
+        {activeStudentSection === "homework" && (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <AssignmentIcon color="primary" />
+                    <Typography variant="h2">课堂作业</Typography>
+                  </Stack>
+                  {homeworkList.map((homework) => {
+                    const submitted = submittedHomework[homework.id];
+                    const selectedFiles = homeworkFiles[homework.id] ?? [];
+                    return (
+                      <Paper key={homework.id} variant="outlined" sx={{ p: 2 }}>
+                        <Stack spacing={1.5}>
+                          <Box>
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                              <Typography fontWeight={700}>{homework.title}</Typography>
+                              <Chip size="small" label={homework.status} />
+                              {submitted && (
+                                <Chip
+                                  size="small"
+                                  color={submitted.status === "late" ? "warning" : "success"}
+                                  label={`已提交 v${submitted.submit_version}`}
+                                />
+                              )}
+                            </Stack>
+                            <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
+                              截止时间：{homework.deadline}
+                              {homework.allow_late ? "，允许迟交" : ""}
+                            </Typography>
+                            {homework.description && <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{homework.description}</Typography>}
+                            {homework.grading_criteria && (
+                              <Typography color="text.secondary" variant="body2" sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>
+                                评分标准：{homework.grading_criteria}
+                              </Typography>
+                            )}
+                            {homework.attachments?.length > 0 && (
+                              <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                                {homework.attachments.map((file) => (
+                                  <Typography key={file.id} color="text.secondary" variant="body2">
+                                    教师附件：{file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
+                                  </Typography>
+                                ))}
+                              </Stack>
+                            )}
+                          </Box>
+                          <TextField
+                            label="提交内容"
+                            value={homeworkText[homework.id] ?? ""}
+                            onChange={(event) =>
+                              setHomeworkText((current) => ({ ...current, [homework.id]: event.target.value }))
+                            }
+                            multiline
+                            minRows={3}
+                            fullWidth
+                          />
+                          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ xs: "stretch", sm: "center" }}>
+                            <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>
+                              选择附件
+                              <input
+                                type="file"
+                                multiple
+                                hidden
+                                onChange={(event) => updateHomeworkFiles(homework.id, event.target.files)}
+                              />
+                            </Button>
+                            <Typography color="text.secondary" variant="body2">
+                              {selectedFiles.length > 0
+                                ? selectedFiles.map((file) => file.name).join("，")
+                                : "支持 doc、pdf、zip、txt、图片等常见格式"}
+                            </Typography>
+                          </Stack>
+                          <Button variant="contained" startIcon={<SendIcon />} onClick={() => handleSubmitHomework(homework)}>
+                            {submitted ? "再次提交" : "提交作业"}
+                          </Button>
+                          <Button variant="outlined" onClick={() => handleLoadHomeworkFeedback(homework)}>
+                            查看反馈
+                          </Button>
+                          {homeworkFeedback[homework.id] && (
+                            <Alert severity={homeworkFeedback[homework.id].published ? "success" : "info"}>
+                              {homeworkFeedback[homework.id].published
+                                ? `得分 ${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_score ?? "-")}：${String((homeworkFeedback[homework.id].submission as Record<string, unknown>)?.final_feedback ?? "")}`
+                                : "教师尚未发布成绩"}
+                            </Alert>
+                          )}
+                        </Stack>
+                      </Paper>
+                    );
+                  })}
+                  {homeworkList.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的作业。</Typography>}
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
+        {activeStudentSection === "feedback" && (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Typography variant="h2">学习反馈</Typography>
+                  <Button variant="outlined" onClick={handleLoadEvaluationFeedback}>
+                    查看课堂评估
+                  </Button>
+                  {evaluationFeedback?.evaluation ? (
+                    <Alert severity="info">
+                      总分 {String((evaluationFeedback.evaluation as Record<string, unknown>).total_score)}，
+                      等级 {String((evaluationFeedback.evaluation as Record<string, unknown>).level)}：
+                      {String((evaluationFeedback.evaluation as Record<string, unknown>).advice ?? "")}
+                    </Alert>
+                  ) : (
+                    <Typography color="text.secondary">教师生成评估后可查看个人课堂反馈。</Typography>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
+        {activeStudentSection === "messages" &&
+          (result ? (
+            <Card sx={{ maxWidth: 760 }}>
+              <CardContent>
+                <Stack spacing={1.5}>
+                  <Box>
+                    <Typography variant="h2">私信老师</Typography>
+                    <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                      与老师的 1:1 私聊，仅你和老师可见。完成签到后即可收发。
+                    </Typography>
+                  </Box>
+                  {privateMessages.map((item) => (
+                    <Box
+                      key={item.id}
+                      sx={{ display: "flex", justifyContent: item.sender_role === "student" ? "flex-end" : "flex-start" }}
+                    >
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          p: 1.5,
+                          maxWidth: "80%",
+                          bgcolor: item.sender_role === "student" ? "primary.main" : "background.paper",
+                          color: item.sender_role === "student" ? "primary.contrastText" : "text.primary",
+                        }}
+                      >
+                        <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
+                        <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
+                          {item.sender_role === "teacher" ? "老师" : "我"} · {item.created_at}
+                        </Typography>
+                      </Paper>
+                    </Box>
+                  ))}
+                  {privateMessages.length === 0 && (
+                    <Typography color="text.secondary">还没有私信，给老师发一条吧。</Typography>
+                  )}
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                    <TextField
+                      label="私信内容"
+                      value={privateContent}
+                      onChange={(event) => setPrivateContent(event.target.value)}
+                      helperText={`${privateContent.length}/500`}
+                      inputProps={{ maxLength: 500 }}
+                      fullWidth
+                    />
+                    <Button
+                      variant="contained"
+                      startIcon={<SendIcon />}
+                      onClick={handleSendPrivateMessage}
+                      disabled={!studentId || !name}
+                      sx={{ minWidth: 120 }}
+                    >
+                      发送
+                    </Button>
+                  </Stack>
+                  {(!studentId || !name) && (
+                    <Alert severity="info">请先在「签到」中完成课堂签到，即可与老师私信。</Alert>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+          ) : (
+            <StudentSectionPlaceholder label="私信老师" />
+          ))}
+
+        <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
+        <AppSnackbar open={Boolean(snackError)} message={snackError} severity="error" onClose={() => setSnackError("")} />
+      </Stack>
+    </Box>
   );
 }
