@@ -26,7 +26,8 @@ import {
   TableHead,
   TableRow,
   TextField,
-  Typography
+  Typography,
+  Tooltip
 } from "@mui/material";
 import StorageIcon from "@mui/icons-material/Storage";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -1545,9 +1546,9 @@ export function TeacherPage() {
   }
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={1}>
       {/* 页面标题（状态信息已移至全局标题栏，见 AppLayout） */}
-      <Typography variant="h1">教师工作台</Typography>
+      <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>教师工作台</Typography>
 
       {error && <Alert severity="error">{error}</Alert>}
       {!health && !authStatus && !error && <CircularProgress size={28} />}
@@ -1591,7 +1592,7 @@ export function TeacherPage() {
           sx={{
             display: "grid",
             gridTemplateColumns: { xs: "1fr", md: "260px minmax(0, 1fr)" },
-            gap: 2,
+            gap: 1.5,
             alignItems: "start"
           }}
         >
@@ -1599,53 +1600,48 @@ export function TeacherPage() {
             variant="outlined"
             sx={{
               position: { xs: "static", md: "sticky" },
-              top: { md: 16 },
-              p: 1,
-              maxHeight: { md: "calc(100vh - 120px)" },
+              top: { md: 4 },
+              p: 0.5,
+              maxHeight: { md: "calc(100vh - 68px)" },
               overflow: "auto"
             }}
           >
-            <Stack spacing={0.75}>
+            <Stack spacing={0.25}>
               {TEACHER_SECTIONS.map((section) => {
                 const unread =
                   section.key === "messages" ? messageUnreadTotal :
                   section.key === "interaction" ? interactionUnread : 0;
                 const labelNode = (
-                  <Box>
-                    <Typography component="span" sx={{ display: "block", fontWeight: 700, lineHeight: 1.3 }}>
-                      {section.label}
-                    </Typography>
-                    <Typography component="span" sx={{ display: "block", fontSize: "0.75rem", opacity: 0.78, lineHeight: 1.4 }}>
-                      {section.description}
-                    </Typography>
-                  </Box>
+                  <Typography component="span" sx={{ fontWeight: 700, lineHeight: 1.3, fontSize: "0.875rem" }}>
+                    {section.label}
+                  </Typography>
                 );
                 return (
-                  <Button
-                    key={section.key}
-                    fullWidth
-                    variant={activeTeacherSection === section.key ? "contained" : "text"}
-                    onClick={() => {
-                      setActiveTeacherSection(section.key);
-                      if (section.key === "interaction") setInteractionUnread(0);
-                    }}
-                    sx={{
-                      justifyContent: "flex-start",
-                      alignItems: "flex-start",
-                      textAlign: "left",
-                      py: 1,
-                      px: 1.25,
-                      minHeight: 58
-                    }}
-                  >
-                    {unread > 0 ? (
-                      <Badge badgeContent={unread} color="error" max={99} sx={{ width: "100%" }}>
-                        {labelNode}
-                      </Badge>
-                    ) : (
-                      labelNode
-                    )}
-                  </Button>
+                  <Tooltip key={section.key} title={section.description} placement="right" arrow>
+                    <Button
+                      fullWidth
+                      variant={activeTeacherSection === section.key ? "contained" : "text"}
+                      onClick={() => {
+                        setActiveTeacherSection(section.key);
+                        if (section.key === "interaction") setInteractionUnread(0);
+                      }}
+                      sx={{
+                        justifyContent: "flex-start",
+                        textAlign: "left",
+                        py: 0.35,
+                        px: 1.25,
+                        minHeight: 36
+                      }}
+                    >
+                      {unread > 0 ? (
+                        <Badge badgeContent={unread} color="error" max={99} sx={{ width: "100%" }}>
+                          {labelNode}
+                        </Badge>
+                      ) : (
+                        labelNode
+                      )}
+                    </Button>
+                  </Tooltip>
                 );
               })}
             </Stack>
