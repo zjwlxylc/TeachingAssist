@@ -185,6 +185,7 @@ import {
 } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
+import { AIChatPanel } from "../components/AIChatPanel";
 import Switch from "@mui/material/Switch";
 import { useAuthStore } from "../store/authStore";
 import { useStatusStore } from "../store/statusStore";
@@ -232,7 +233,8 @@ type TeacherSectionKey =
   | "evaluation"
   | "announcements"
   | "interaction"
-  | "messages";
+  | "messages"
+  | "aichat";
 
 const DEFAULT_EVALUATION_WEIGHTS: EvaluationWeights = {
   attendance_weight: 20,
@@ -259,7 +261,8 @@ const TEACHER_SECTIONS: Array<{ key: TeacherSectionKey; label: string; descripti
   { key: "evaluation", label: "学习评估", description: "权重、评估、恢复记录" },
   { key: "announcements", label: "课堂公告", description: "教师正式通知" },
   { key: "interaction", label: "课堂互动", description: "自由留言、发言开关" },
-  { key: "messages", label: "私信", description: "学生私聊、回复" }
+  { key: "messages", label: "私信", description: "学生私聊、回复" },
+  { key: "aichat", label: "AI 课堂", description: "课程相关对话、查询本课堂数据" }
 ];
 
 /** 在课堂列表中挑选“默认进入”的课堂：优先进行中（status=active）且 id 最大的课堂，
@@ -316,6 +319,7 @@ export function TeacherPage() {
   const [announcementContent, setAnnouncementContent] = useState("");
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [interactionSessionId, setInteractionSessionId] = useState<number | "">("");
+  const [aiSessionId, setAiSessionId] = useState<number | "">("");
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
   const [interactionContent, setInteractionContent] = useState("");
@@ -1195,7 +1199,9 @@ export function TeacherPage() {
       void handleLoadAnnouncements(target);
     } else if (activeTeacherSection === "interaction" && interactionSessionId === "") {
       void handleLoadInteraction(target);
-    } else if (interactionSessionId === "") {
+    } else if (activeTeacherSection === "aichat" && aiSessionId === "") {
+      setAiSessionId(target);
+    } else if (interactionSessionId === "" && activeTeacherSection !== "aichat") {
       // 登录即预选默认互动课堂，使红点提醒能从课堂开始时就监听最新开课课堂的留言
       void handleLoadInteraction(target);
     }
@@ -1207,7 +1213,8 @@ export function TeacherPage() {
     homeworkSessionId,
     evaluationSessionId,
     announcementSessionId,
-    interactionSessionId
+    interactionSessionId,
+    aiSessionId
   ]);
 
   async function handleLoadQuestions(sessionId: number) {
@@ -3729,6 +3736,51 @@ export function TeacherPage() {
                   )}
                 </Grid>
               </Grid>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
+      {isAuthenticated && activeTeacherSection === "aichat" && (
+        <Card>
+          <CardContent>
+            <Stack spacing={2}>
+              <Box>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <PsychologyIcon color="primary" />
+                  <Typography variant="h2">AI 课堂</Typography>
+                </Stack>
+                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                  与 AI 助手的课程相关对话。可问课程知识，或查询本课堂聚合数据（签到、作业、答题、评估）。对话内容不保存。
+                </Typography>
+              </Box>
+              <FormControl fullWidth sx={{ maxWidth: 520 }}>
+                <InputLabel id="aichat-session-label">AI 课堂所属课堂</InputLabel>
+                <Select
+                  labelId="aichat-session-label"
+                  label="AI 课堂所属课堂"
+                  value={aiSessionId}
+                  onChange={(event) => setAiSessionId(Number(event.target.value))}
+                >
+                  {sessions.map((session) => (
+                    <MenuItem key={session.id} value={session.id}>
+                      #{session.id} {session.course_name} / {session.title} / {sessionStatusLabel(session.status)}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              {aiSessionId === "" ? (
+                <Alert severity="info">请先在上方选择一个课堂，再开始与 AI 对话。</Alert>
+              ) : (
+                <Box sx={{ height: 620 }}>
+                  <AIChatPanel
+                    key={aiSessionId}
+                    role="teacher"
+                    sessionId={Number(aiSessionId)}
+                    courseName={sessions.find((s) => s.id === aiSessionId)?.course_name}
+                  />
+                </Box>
+              )}
             </Stack>
           </CardContent>
         </Card>

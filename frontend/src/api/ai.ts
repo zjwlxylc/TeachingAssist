@@ -152,3 +152,33 @@ export function toggleModerationEnabled(enabled: boolean) {
     body: JSON.stringify({ enabled })
   });
 }
+
+export interface AiChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface AiChatResult {
+  reply: string;
+  intent: string;
+  guarded: boolean;
+}
+
+export function chatWithAi(sessionId: number, messages: AiChatMessage[]) {
+  return request<AiChatResult>("/ai/chat", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, messages })
+  });
+}
+
+export function studentChatWithAi(
+  sessionId: number,
+  studentId: string,
+  name: string,
+  messages: AiChatMessage[]
+) {
+  return request<AiChatResult>("/ai/student-chat", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, student_id: studentId, name, messages })
+  });
+}

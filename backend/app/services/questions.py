@@ -718,6 +718,45 @@ def get_student_draft(question_id: int, student_number: str, name: str) -> dict[
     }
 
 
+def get_student_answer_summary(session_id: int, student_number: str, name: str) -> dict[str, Any]:
+    """返回该生在本课堂每题的最新作答、判分与状态（供 AI 课堂"我的答题"使用）。"""
+    with get_connection() as connection:
+        session = get_session_public(session_id)
+        student = _resolve_student(connection, session, student_number, name)
+        rows = connection.execute(
+            """
+            SELECT q.id, q.title, q.question_type, q.score,
+                   qa.answer_text, qa.status, qa.is_correct, qa.score AS answer_score, qa.submitted_at
+            FROM questions q
+            LEFT JOIN question_answers qa ON qa.question_id = q.id AND qa.student_id = ? AND qa.is_latest = 1
+            WHERE q.session_id = ?
+            ORDER BY q.id
+            """,
+            (student["id"], session_id),
+        ).fetchall()
+    answers = []
+    for row in rows:
+        item = _row_to_dict(row)
+        answers.append(
+            {
+                "question_id": item["id"],
+                "title": item["title"],
+                "question_type": item["question_type"],
+                "score": item["score"],
+                "answer_text": item.get("answer_text"),
+                "status": item.get("status"),
+                "is_correct": item.get("is_correct"),
+                "answer_score": item.get("answer_score"),
+                "submitted_at": item.get("submitted_at"),
+            }
+        )
+    return {
+        "session": session,
+        "student": {"student_id": student_number, "name": name},
+        "answers": answers,
+    }
+
+
 def export_question_answers(session_id: int) -> dict[str, Any]:
     get_session_public(session_id)
     with get_connection() as connection:

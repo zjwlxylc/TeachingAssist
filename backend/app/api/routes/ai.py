@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
 from app.services import ai as ai_service
+from app.services import ai_chat as ai_chat_service
 
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -141,3 +142,31 @@ def toggle_moderation(
         ai_service.set_interaction_moderation_enabled(payload.enabled),
         message=f"课堂互动发言 AI 甄别已{'开启' if payload.enabled else '关闭'}",
     )
+
+
+class AiChatRequest(BaseModel):
+    session_id: int
+    messages: list[dict[str, str]]
+
+
+class AiStudentChatRequest(BaseModel):
+    session_id: int
+    student_id: str
+    name: str
+    messages: list[dict[str, str]]
+
+
+@router.post("/chat", response_model=ApiResponse[dict[str, Any]])
+def chat(
+    payload: AiChatRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, Any]]:
+    """教师端 AI 课堂对话（需教师鉴权）。"""
+    return ok(ai_chat_service.run_ai_class_chat(payload.session_id, payload.messages, "teacher", None))
+
+
+@router.post("/student-chat", response_model=ApiResponse[dict[str, Any]])
+def student_chat(payload: AiStudentChatRequest) -> ApiResponse[dict[str, Any]]:
+    """学生端 AI 课堂对话（以学号+姓名在服务端重校验身份）。"""
+    identity = {"student_number": payload.student_id, "name": payload.name}
+    return ok(ai_chat_service.run_ai_class_chat(payload.session_id, payload.messages, "student", identity))

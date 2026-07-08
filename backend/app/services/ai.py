@@ -313,6 +313,19 @@ def _post_chat_completion(
         raise AppError("AI 返回格式异常", code="AI_RESPONSE_INVALID") from exc
 
 
+def generate_chat(
+    messages: list[dict[str, str]],
+    temperature: float = 0.2,
+    response_format: dict[str, str] | None = None,
+) -> str:
+    """通用聊天补全，供 AI 课堂等对话场景复用（需已配置并启用 Provider）。"""
+    with get_connection() as connection:
+        provider = _active_provider(connection)
+    if provider is None:
+        raise AppError("未配置 AI Provider", code="AI_PROVIDER_NOT_CONFIGURED")
+    return _post_chat_completion(provider, messages, response_format=response_format, temperature=temperature)
+
+
 def generate_structured_json(
     scenario: str,
     prompt: str,

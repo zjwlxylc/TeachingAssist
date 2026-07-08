@@ -23,6 +23,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import AssignmentIcon from "@mui/icons-material/Assignment";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import PsychologyIcon from "@mui/icons-material/Psychology";
 
 import { ClassroomSession } from "../api/academic";
 import {
@@ -67,6 +68,7 @@ import {
 import { recordCachedReplay } from "../api/recovery";
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
+import { AIChatPanel } from "../components/AIChatPanel";
 import { useStatusStore } from "../store/statusStore";
 
 type ClassroomMessage =
@@ -119,7 +121,8 @@ type StudentSectionKey =
   | "interaction"
   | "homework"
   | "feedback"
-  | "messages";
+  | "messages"
+  | "aichat";
 
 const STUDENT_SECTIONS: Array<{ key: StudentSectionKey; label: string; description: string }> = [
   { key: "signin", label: "课堂签到", description: "填写身份、选择课堂并签到" },
@@ -129,6 +132,7 @@ const STUDENT_SECTIONS: Array<{ key: StudentSectionKey; label: string; descripti
   { key: "homework", label: "课堂作业", description: "查看与提交作业" },
   { key: "feedback", label: "学习反馈", description: "查看个人课堂评估" },
   { key: "messages", label: "私信老师", description: "与老师一对一对话" },
+  { key: "aichat", label: "AI 课堂", description: "课程相关对话、查询我的数据" },
 ];
 
 function StudentSectionPlaceholder({ label }: { label: string }) {
@@ -1184,6 +1188,37 @@ export function StudentPage() {
             </Card>
           ) : (
             <StudentSectionPlaceholder label="私信老师" />
+          ))}
+
+        {activeStudentSection === "aichat" &&
+          (!result || !currentSession ? (
+            <StudentSectionPlaceholder label="AI 课堂" />
+          ) : (
+            <Card sx={{ maxWidth: 820 }}>
+              <CardContent>
+                <Stack spacing={2}>
+                  <Box>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <PsychologyIcon color="primary" />
+                      <Typography variant="h2">AI 课堂</Typography>
+                    </Stack>
+                    <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                      与 AI 助手的课程相关对话。可问课程知识，或查询你自己的学习数据（签到、作业、答题、评估）。对话内容不保存。
+                    </Typography>
+                  </Box>
+                  <Box sx={{ height: 620 }}>
+                    <AIChatPanel
+                      key={currentSession.id}
+                      role="student"
+                      sessionId={currentSession.id}
+                      courseName={currentSession.course_name}
+                      studentId={studentId}
+                      studentName={name}
+                    />
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
           ))}
 
         <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
