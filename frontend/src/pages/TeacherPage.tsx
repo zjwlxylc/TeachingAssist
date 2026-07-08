@@ -47,6 +47,7 @@ import SendIcon from "@mui/icons-material/Send";
 import AssignmentIcon from "@mui/icons-material/Assignment";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import AssessmentIcon from "@mui/icons-material/Assessment";
+import ChatBubble from "../components/ChatBubble";
 import DownloadIcon from "@mui/icons-material/Download";
 import RestoreIcon from "@mui/icons-material/Restore";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
@@ -398,6 +399,18 @@ export function TeacherPage() {
   useEffect(() => {
     activeTeacherSectionRef.current = activeTeacherSection;
   }, [activeTeacherSection]);
+
+  // error 自动消失：5 秒后清空，用户手动关闭则取消计时器
+  const teacherErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (error) {
+      teacherErrorTimerRef.current = setTimeout(() => setError(""), 5000);
+    }
+    return () => {
+      if (teacherErrorTimerRef.current) clearTimeout(teacherErrorTimerRef.current);
+    };
+  }, [error]);
+
   const { isAuthenticated, setTeacherSession, logout: clearSession } = useAuthStore();
 
   /** Session status: raw English → Chinese label */
@@ -1550,7 +1563,7 @@ export function TeacherPage() {
       {/* 页面标题（状态信息已移至全局标题栏，见 AppLayout） */}
       <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>教师工作台</Typography>
 
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
       {!health && !authStatus && !error && <CircularProgress size={28} />}
 
       {authStatus && !isAuthenticated && (
@@ -3506,54 +3519,57 @@ export function TeacherPage() {
       {isAuthenticated && activeTeacherSection === "interaction" && (
         <Card>
           <CardContent>
-            <Stack spacing={2}>
+            <Stack spacing={1.5}>
               <Box>
                 <Typography variant="h2">课堂互动</Typography>
-                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                <Typography color="text.secondary" sx={{ mt: 0.25 }} variant="body2">
                   学生完成正常或迟到签到后可发言；教师可随时暂停学生发言。
                 </Typography>
               </Box>
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                  <Typography fontWeight={700}>待审核发言（AI 拦截）</Typography>
-                  <Button
-                    size="small"
-                    onClick={() => interactionSessionId && loadModerationLogs(Number(interactionSessionId))}
-                    disabled={!interactionSessionId || moderationLoading}
-                  >
-                    刷新
-                  </Button>
-                </Stack>
-                <Stack spacing={1} sx={{ mt: 1 }}>
-                  {moderationLogs.length === 0 && (
-                    <Typography color="text.secondary">暂无被拦截的发言。</Typography>
-                  )}
-                  {moderationLogs.map((log) => (
-                    <Box key={log.id} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1 }}>
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                        <Chip size="small" label="待审核" color="warning" />
-                        <Typography fontWeight={700}>{log.student_name}</Typography>
-                        {log.reason && (
-                          <Typography variant="body2" color="text.secondary">原因：{log.reason}</Typography>
-                        )}
-                      </Stack>
-                      <Typography sx={{ mt: 0.5, whiteSpace: "pre-wrap" }}>{log.content}</Typography>
-                      <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-                        <Button size="small" variant="contained" onClick={() => handleReviewModeration(log.id, true)}>
-                          放行上墙
-                        </Button>
-                        <Button size="small" variant="outlined" color="inherit" onClick={() => handleReviewModeration(log.id, false)}>
-                          忽略
-                        </Button>
-                      </Stack>
-                    </Box>
-                  ))}
-                </Stack>
-              </Paper>
-              <Grid container spacing={2}>
-                <Grid item xs={12} md={5}>
+              <Grid container spacing={1.5}>
+                <Grid item xs={12} md={4}>
                   <Stack spacing={1.5}>
-                    <FormControl fullWidth>
+                    <Paper variant="outlined" sx={{ p: 1.5 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                        <Stack direction="row" spacing={0.75} alignItems="center">
+                          <WarningAmberIcon color="warning" fontSize="small" />
+                          <Typography fontWeight={700} fontSize="0.9rem">待审核发言</Typography>
+                        </Stack>
+                        <Button
+                          size="small"
+                          onClick={() => interactionSessionId && loadModerationLogs(Number(interactionSessionId))}
+                          disabled={!interactionSessionId || moderationLoading}
+                        >
+                          刷新
+                        </Button>
+                      </Stack>
+                      <Stack spacing={0.75} sx={{ mt: 1 }}>
+                        {moderationLogs.length === 0 && (
+                          <Typography color="text.secondary" variant="body2">暂无被拦截的发言。</Typography>
+                        )}
+                        {moderationLogs.map((log) => (
+                          <Box key={log.id} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1, bgcolor: "rgba(255, 168, 0, 0.08)" }}>
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                              <Chip size="small" label="待审核" color="warning" />
+                              <Typography fontWeight={700}>{log.student_name}</Typography>
+                              {log.reason && (
+                                <Typography variant="body2" color="text.secondary">原因：{log.reason}</Typography>
+                              )}
+                            </Stack>
+                            <Typography sx={{ mt: 0.5, whiteSpace: "pre-wrap" }}>{log.content}</Typography>
+                            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                              <Button size="small" variant="contained" onClick={() => handleReviewModeration(log.id, true)}>
+                                放行上墙
+                              </Button>
+                              <Button size="small" variant="outlined" color="inherit" onClick={() => handleReviewModeration(log.id, false)}>
+                                忽略
+                              </Button>
+                            </Stack>
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Paper>
+                    <FormControl fullWidth size="small">
                       <InputLabel id="interaction-session-label">互动课堂</InputLabel>
                       <Select
                         labelId="interaction-session-label"
@@ -3583,7 +3599,7 @@ export function TeacherPage() {
                       value={interactionContent}
                       onChange={(event) => setInteractionContent(event.target.value)}
                       multiline
-                      minRows={3}
+                      minRows={2}
                       helperText={`${interactionContent.length}/300`}
                       inputProps={{ maxLength: 300 }}
                       fullWidth
@@ -3593,25 +3609,26 @@ export function TeacherPage() {
                     </Button>
                   </Stack>
                 </Grid>
-                <Grid item xs={12} md={7}>
-                  <Paper variant="outlined" sx={{ p: 2, minHeight: 260, maxHeight: 360, overflow: "auto" }}>
-                    <Stack spacing={1.5}>
-                      {interactionMessages.map((item) => (
-                        <Box key={item.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
-                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                            <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
-                            <Typography fontWeight={700}>{item.sender_name}</Typography>
-                            <Typography color="text.secondary" variant="body2">
-                              {item.created_at}
-                            </Typography>
-                          </Stack>
-                          <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-                        </Box>
-                      ))}
-                      {interactionMessages.length === 0 && (
+                <Grid item xs={12} md={8} sx={{ display: "flex" }}>
+                  <Paper variant="outlined" sx={{ p: 1.5, flex: 1, display: "flex", flexDirection: "column", minHeight: 360, maxHeight: 600 }}>
+                    {interactionMessages.length === 0 ? (
+                      <Box sx={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <Typography color="text.secondary">选择课堂后可查看互动留言。</Typography>
-                      )}
-                    </Stack>
+                      </Box>
+                    ) : (
+                      <Stack spacing={1.5} sx={{ overflow: "auto", flex: 1, pr: 0.5 }}>
+                        {interactionMessages.map((item) => (
+                          <ChatBubble
+                            key={item.id}
+                            role={item.sender_role === "teacher" ? "teacher" : "student"}
+                            name={item.sender_name}
+                            time={item.created_at}
+                            content={item.content}
+                            selfName={item.sender_name}
+                          />
+                        ))}
+                      </Stack>
+                    )}
                   </Paper>
                 </Grid>
               </Grid>
@@ -3623,7 +3640,7 @@ export function TeacherPage() {
       {isAuthenticated && activeTeacherSection === "messages" && (
         <Card>
           <CardContent>
-            <Stack spacing={2}>
+            <Stack spacing={1.5}>
               <Box>
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Typography variant="h2">学生私信</Typography>
@@ -3631,39 +3648,48 @@ export function TeacherPage() {
                     <Chip size="small" color="error" label={`未读 ${messageUnreadTotal}`} />
                   )}
                 </Stack>
-                <Typography color="text.secondary" sx={{ mt: 0.5 }}>
+                <Typography color="text.secondary" sx={{ mt: 0.25 }} variant="body2">
                   学生与老师的 1:1 私聊，仅双方可见；点开会话即标记已读。
                 </Typography>
               </Box>
-              <Grid container spacing={2}>
-                <Grid item xs={12} md={4}>
-                  <Paper variant="outlined" sx={{ p: 1, maxHeight: 420, overflow: "auto" }}>
-                    <Stack spacing={0.5}>
-                      {conversations.map((conv) => (
-                        <Button
-                          key={conv.student_pk}
-                          fullWidth
-                          variant={selectedMessageStudentPk === conv.student_pk ? "contained" : "outlined"}
-                          onClick={() => handleSelectConversation(conv.student_pk)}
-                          sx={{ justifyContent: "flex-start", textAlign: "left", textTransform: "none" }}
-                        >
-                          <Box sx={{ width: "100%" }}>
-                            <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                              <Typography fontWeight={700}>{conv.student_name}</Typography>
+              <Grid container spacing={1.5}>
+                <Grid item xs={12} md={3.5}>
+                  <Paper variant="outlined" sx={{ p: 0.75, maxHeight: 450, overflow: "auto" }}>
+                    <Stack spacing={0.75}>
+                      {conversations.map((conv) => {
+                        const selected = selectedMessageStudentPk === conv.student_pk;
+                        return (
+                          <Box
+                            key={conv.student_pk}
+                            onClick={() => handleSelectConversation(conv.student_pk)}
+                            sx={{
+                              cursor: "pointer",
+                              borderRadius: 1.5,
+                              px: 1.25,
+                              py: 1,
+                              border: "1px solid",
+                              borderColor: selected ? "primary.main" : "divider",
+                              borderLeftWidth: selected ? 3 : 1,
+                              bgcolor: selected ? "rgba(25, 118, 210, 0.08)" : "transparent",
+                              "&:hover": { bgcolor: selected ? "rgba(25, 118, 210, 0.08)" : "action.hover" },
+                              transition: "background .15s, border-color .15s",
+                            }}
+                          >
+                            <Stack direction="row" spacing={0.5} alignItems="center" justifyContent="space-between">
+                              <Stack direction="row" spacing={0.5} alignItems="baseline">
+                                <Typography fontWeight={700} fontSize="0.875rem">{conv.student_name}</Typography>
+                                <Typography variant="caption" color="text.secondary">{conv.class_name}</Typography>
+                              </Stack>
                               {conv.unread_count > 0 && (
                                 <Chip size="small" color="error" label={conv.unread_count} />
                               )}
                             </Stack>
-                            <Typography variant="caption" color="text.secondary" noWrap display="block">
-                              {conv.student_number}
-                              {conv.class_name ? ` / ${conv.class_name}` : ""}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary" noWrap display="block">
+                            <Typography variant="caption" color="text.secondary" noWrap display="block" sx={{ mt: 0.25 }}>
                               {conv.last_message}
                             </Typography>
                           </Box>
-                        </Button>
-                      ))}
+                        );
+                      })}
                       {conversations.length === 0 && (
                         <Typography color="text.secondary" sx={{ p: 1 }}>
                           暂无学生私信。
@@ -3672,39 +3698,36 @@ export function TeacherPage() {
                     </Stack>
                   </Paper>
                 </Grid>
-                <Grid item xs={12} md={8}>
+                <Grid item xs={12} md={8.5} sx={{ display: "flex" }}>
                   {messageThreadStudent ? (
-                    <Stack spacing={1.5}>
-                      <Typography fontWeight={700}>
-                        {messageThreadStudent.name}（{messageThreadStudent.student_id}）
-                      </Typography>
-                      <Paper variant="outlined" sx={{ p: 2, minHeight: 220, maxHeight: 360, overflow: "auto" }}>
-                        <Stack spacing={1}>
-                          {messageThread.map((item) => (
-                            <Box
-                              key={item.id}
-                              sx={{ display: "flex", justifyContent: item.sender_role === "teacher" ? "flex-end" : "flex-start" }}
-                            >
-                              <Paper
-                                variant="outlined"
-                                sx={{
-                                  p: 1.5,
-                                  maxWidth: "80%",
-                                  bgcolor: item.sender_role === "teacher" ? "primary.main" : "background.paper",
-                                  color: item.sender_role === "teacher" ? "primary.contrastText" : "text.primary",
-                                }}
-                              >
-                                <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-                                <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
-                                  {item.sender_role === "teacher" ? "我" : item.sender_name} · {item.created_at}
-                                </Typography>
-                              </Paper>
-                            </Box>
-                          ))}
-                          {messageThread.length === 0 && (
+                    <Stack spacing={1} sx={{ flex: 1, width: "100%" }}>
+                      <Box>
+                        <Typography fontWeight={700} fontSize="1rem">
+                          {messageThreadStudent.name}
+                          <Typography component="span" color="text.secondary" fontWeight={400} sx={{ ml: 0.5 }} variant="body2">
+                            （{messageThreadStudent.student_id}）
+                          </Typography>
+                        </Typography>
+                        <Divider sx={{ mt: 1 }} />
+                      </Box>
+                      <Paper variant="outlined" sx={{ p: 1.5, flex: 1, display: "flex", flexDirection: "column", minHeight: 320, maxHeight: 560 }}>
+                        {messageThread.length === 0 ? (
+                          <Box sx={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                             <Typography color="text.secondary">还没有消息，发条回复开始对话。</Typography>
-                          )}
-                        </Stack>
+                          </Box>
+                        ) : (
+                          <Stack spacing={1.5} sx={{ overflow: "auto", flex: 1, pr: 0.5 }}>
+                            {messageThread.map((item) => (
+                              <ChatBubble
+                                key={item.id}
+                                role={item.sender_role === "teacher" ? "teacher" : "student"}
+                                name={item.sender_name}
+                                time={item.created_at}
+                                content={item.content}
+                              />
+                            ))}
+                          </Stack>
+                        )}
                       </Paper>
                       <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                         <TextField
@@ -3726,7 +3749,7 @@ export function TeacherPage() {
                       </Stack>
                     </Stack>
                   ) : (
-                    <Paper variant="outlined" sx={{ p: 4, textAlign: "center" }}>
+                    <Paper variant="outlined" sx={{ p: 3, textAlign: "center", flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                       <Typography color="text.secondary">从左侧选择一个学生的会话开始回复。</Typography>
                     </Paper>
                   )}

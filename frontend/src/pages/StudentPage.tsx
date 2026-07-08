@@ -16,6 +16,7 @@ import {
   TextField,
   Typography
 } from "@mui/material";
+import ChatBubble from "../components/ChatBubble";
 import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import LoginIcon from "@mui/icons-material/Login";
@@ -185,6 +186,17 @@ export function StudentPage() {
   useEffect(() => {
     activeStudentSectionRef.current = activeStudentSection;
   }, [activeStudentSection]);
+
+  // error 自动消失：5 秒后清空，用户手动关闭则取消计时器
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (error) {
+      errorTimerRef.current = setTimeout(() => setError(""), 5000);
+    }
+    return () => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, [error]);
 
   useEffect(() => {
     loadActiveSessions();
@@ -966,16 +978,14 @@ export function StudentPage() {
                     </Typography>
                   </Box>
                   {interactionMessages.map((item) => (
-                    <Paper key={item.id} variant="outlined" sx={{ p: 1.5 }}>
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                        <Chip size="small" label={item.sender_role === "teacher" ? "教师" : "学生"} color={item.sender_role === "teacher" ? "primary" : "default"} />
-                        <Typography fontWeight={700}>{item.sender_name}</Typography>
-                        <Typography color="text.secondary" variant="body2">
-                          {item.created_at}
-                        </Typography>
-                      </Stack>
-                      <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-                    </Paper>
+                    <ChatBubble
+                      key={item.id}
+                      role={item.sender_role === "teacher" ? "teacher" : "student"}
+                      name={item.sender_name}
+                      time={item.created_at}
+                      content={item.content}
+                      selfName={item.sender_name}
+                    />
                   ))}
                   {interactionMessages.length === 0 && (
                     <Typography color="text.secondary">暂无课堂互动留言。</Typography>
@@ -1138,25 +1148,14 @@ export function StudentPage() {
                     </Typography>
                   </Box>
                   {privateMessages.map((item) => (
-                    <Box
+                    <ChatBubble
                       key={item.id}
-                      sx={{ display: "flex", justifyContent: item.sender_role === "student" ? "flex-end" : "flex-start" }}
-                    >
-                      <Paper
-                        variant="outlined"
-                        sx={{
-                          p: 1.5,
-                          maxWidth: "80%",
-                          bgcolor: item.sender_role === "student" ? "primary.main" : "background.paper",
-                          color: item.sender_role === "student" ? "primary.contrastText" : "text.primary",
-                        }}
-                      >
-                        <Typography sx={{ whiteSpace: "pre-wrap" }}>{item.content}</Typography>
-                        <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
-                          {item.sender_role === "teacher" ? "老师" : "我"} · {item.created_at}
-                        </Typography>
-                      </Paper>
-                    </Box>
+                      role={item.sender_role === "student" ? "student" : "teacher"}
+                      name={item.sender_role === "student" ? (item.sender_name || "我") : item.sender_name}
+                      time={item.created_at}
+                      content={item.content}
+                      selfName={item.sender_role === "teacher" ? "老师" : undefined}
+                    />
                   ))}
                   {privateMessages.length === 0 && (
                     <Typography color="text.secondary">还没有私信，给老师发一条吧。</Typography>
