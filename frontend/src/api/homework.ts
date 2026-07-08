@@ -165,10 +165,14 @@ export function publishHomeworkGrades(homeworkId: number) {
   });
 }
 
-export function fetchHomeworkFeedback(homeworkId: number, studentId: string, name: string) {
+export function fetchHomeworkFeedback(homeworkId: number, studentId: string, name: string, token?: string | null) {
+  const body: Record<string, unknown> = { student_id: studentId, name };
+  if (token) {
+    body.token = token;
+  }
   return request<Record<string, unknown>>(`/homework/${homeworkId}/feedback`, {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId, name })
+    body: JSON.stringify(body)
   });
 }
 

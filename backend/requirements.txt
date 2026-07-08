@@ -4,3 +4,4 @@ pydantic==2.10.5
 PyYAML==6.0.2
 python-multipart==0.0.20
 openpyxl==3.1.5
+cryptography>=42.0.0

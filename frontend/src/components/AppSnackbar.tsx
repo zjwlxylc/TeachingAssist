@@ -16,10 +16,8 @@ export function AppSnackbar({ open, message, severity = "info", onClose }: AppSn
         onClose={onClose}
         sx={{
           width: "100%",
-          bgcolor: "#ff7a00",
-          color: "#ffffff",
-          "& .MuiAlert-icon": { color: "#ffffff" },
-          "& .MuiAlert-action": { color: "#ffffff" },
+          // 颜色由 severity 决定（filled 变体已按级别着色），不再硬编码覆盖
+          "& .MuiAlert-action": { color: "inherit" },
         }}
       >
         {message}

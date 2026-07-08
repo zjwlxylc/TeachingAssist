@@ -33,10 +33,14 @@ export function updateEvaluationWeights(payload: Record<string, number>) {
   });
 }
 
-export function fetchStudentEvaluationFeedback(sessionId: number, studentId: string, name: string) {
+export function fetchStudentEvaluationFeedback(sessionId: number, studentId: string, name: string, token?: string | null) {
+  const body: Record<string, unknown> = { student_id: studentId, name };
+  if (token) {
+    body.token = token;
+  }
   return request<Record<string, unknown>>(`/evaluation/sessions/${sessionId}/student-feedback`, {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId, name })
+    body: JSON.stringify(body)
   });
 }
 

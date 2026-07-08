@@ -56,17 +56,35 @@ export function messageSocketUrl(token?: string, studentId?: string, name?: stri
   return `${protocol}//${window.location.host}/ws/messages?${params.toString()}`;
 }
 
-export function sendStudentMessage(studentId: string, name: string, content: string) {
+export function sendStudentMessage(studentId: string, name: string, content: string, token?: string | null) {
   return request<PrivateMessage>(`/messages`, {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId, name, content })
+    body: JSON.stringify({ student_id: studentId, name, content, token: token ?? undefined })
   });
 }
 
-export function fetchStudentThread(studentId: string, name: string) {
-  return request<PrivateMessage[]>(
-    `/messages/mine?student_id=${encodeURIComponent(studentId)}&name=${encodeURIComponent(name)}`
-  );
+export function fetchStudentThread(studentId: string, name: string, token?: string | null) {
+  const params = new URLSearchParams({ student_id: studentId, name });
+  if (token) {
+    params.set("token", token);
+  }
+  return request<PrivateMessage[]>(`/messages/mine?${params.toString()}`);
+}
+
+export function markStudentMessagesRead(token?: string | null) {
+  const params = new URLSearchParams();
+  if (token) {
+    params.set("token", token);
+  }
+  return request<{ updated: number }>(`/messages/mine/read?${params.toString()}`, {
+    method: "POST"
+  });
+}
+
+export function markTeacherMessagesRead(studentId: number) {
+  return request<{ updated: number }>(`/messages/students/${studentId}/read`, {
+    method: "POST"
+  });
 }
 
 export function fetchConversations() {

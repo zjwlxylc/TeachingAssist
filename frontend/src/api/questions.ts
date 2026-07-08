@@ -110,10 +110,14 @@ export function fetchAnonymousQuestionStats(questionId: number) {
   return request<Omit<QuestionStats, "answers"> & { anonymous: boolean }>(`/questions/${questionId}/stats/anonymous`);
 }
 
-export function fetchQuestionDraft(questionId: number, studentId: string, name: string) {
+export function fetchQuestionDraft(questionId: number, studentId: string, name: string, token?: string | null) {
+  const body: Record<string, unknown> = { student_id: studentId, name };
+  if (token) {
+    body.token = token;
+  }
   return request<Record<string, unknown>>(`/questions/${questionId}/draft`, {
     method: "POST",
-    body: JSON.stringify({ student_id: studentId, name })
+    body: JSON.stringify(body)
   });
 }
 

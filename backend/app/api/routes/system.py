@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
 from app.services.backup import create_backup, list_backups, restore_backup
-from app.services.network import get_access_info
+from app.services.network import get_access_info, save_selected_access
 
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -34,6 +34,8 @@ def update_access_info(
     payload: AccessInfoRequest,
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
+    # 持久化教师选择的访问配置，避免下次进入时丢失。
+    save_selected_access(payload.selected_ip, payload.selected_port)
     return ok(get_access_info(payload.selected_ip, payload.selected_port))
 
 

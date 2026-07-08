@@ -6,6 +6,7 @@ from typing import Any
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 from app.services import ai as ai_service
+from app.services import student_auth
 from app.services.classroom import get_session_public
 
 
@@ -107,49 +108,80 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
             """,
             (session["id"],),
         ).fetchall()
-        student_evals: list[dict[str, Any]] = []
-        for row in students:
-            student = _row_to_dict(row)
-            sign_in = connection.execute(
-                "SELECT status FROM sign_in_records WHERE session_id = ? AND student_id = ?",
-                (session_id, student["id"]),
-            ).fetchone()
-            status = sign_in["status"] if sign_in else None
-            attendance_score = 100 if status == "normal" else 80 if status == "late" else 60 if status == "leave" else 0
-
-            question_row = connection.execute(
+        # 一次性聚合各维度按学生的统计，避免对每名学生循环发起 4 条查询（N+1）。
+        session_total_questions = int(
+            connection.execute("SELECT COUNT(*) FROM questions WHERE session_id = ?", (session_id,)).fetchone()[0] or 0
+        )
+        session_total_homework = int(
+            connection.execute("SELECT COUNT(*) FROM homework WHERE session_id = ?", (session_id,)).fetchone()[0] or 0
+        )
+        sign_in_map = {
+            row["student_id"]: row["status"]
+            for row in connection.execute(
+                "SELECT student_id, status FROM sign_in_records WHERE session_id = ?", (session_id,)
+            ).fetchall()
+        }
+        question_agg = {
+            row["student_id"]: row
+            for row in connection.execute(
                 """
-                SELECT COUNT(*) AS total_questions,
+                SELECT qa.student_id AS student_id,
                        COUNT(qa.id) AS answered,
-                       AVG(CASE WHEN qa.status IN ('submitted', 'timeout') THEN qa.score ELSE 0 END) AS avg_score,
                        SUM(COALESCE(qbr.total_score, 0)) AS bonus_score
                 FROM questions q
-                LEFT JOIN question_answers qa
-                  ON qa.question_id = q.id AND qa.student_id = ? AND qa.is_latest = 1
+                LEFT JOIN question_answers qa ON qa.question_id = q.id AND qa.is_latest = 1
                 LEFT JOIN question_bonus_records qbr ON qbr.answer_id = qa.id
                 WHERE q.session_id = ?
+                GROUP BY qa.student_id
                 """,
-                (student["id"], session_id),
-            ).fetchone()
-            total_questions = int(question_row["total_questions"] or 0)
-            answered = int(question_row["answered"] or 0)
-            question_score = 100 if total_questions == 0 else min(100, (answered / total_questions) * 60 + float(question_row["bonus_score"] or 0) * 2)
-
-            homework_row = connection.execute(
+                (session_id,),
+            ).fetchall()
+        }
+        homework_agg = {
+            row["student_id"]: row
+            for row in connection.execute(
                 """
-                SELECT COUNT(h.id) AS total_homework,
+                SELECT hs.student_id AS student_id,
                        COUNT(hs.id) AS submitted,
                        AVG(COALESCE(hs.final_score, hs.ai_score)) AS avg_homework_score
                 FROM homework h
-                LEFT JOIN homework_submissions hs
-                  ON hs.homework_id = h.id AND hs.student_id = ? AND hs.is_latest = 1
+                LEFT JOIN homework_submissions hs ON hs.homework_id = h.id AND hs.is_latest = 1
                 WHERE h.session_id = ?
+                GROUP BY hs.student_id
                 """,
-                (student["id"], session_id),
-            ).fetchone()
-            total_homework = int(homework_row["total_homework"] or 0)
-            submitted_homework = int(homework_row["submitted"] or 0)
-            avg_homework = homework_row["avg_homework_score"]
+                (session_id,),
+            ).fetchall()
+        }
+        message_agg = {
+            row["student_id"]: int(row["total"])
+            for row in connection.execute(
+                """
+                SELECT sender_student_id AS student_id, COUNT(*) AS total
+                FROM classroom_interaction_messages
+                WHERE session_id = ? AND is_deleted = 0
+                GROUP BY sender_student_id
+                """,
+                (session_id,),
+            ).fetchall()
+        }
+
+        student_evals: list[dict[str, Any]] = []
+        for row in students:
+            student = _row_to_dict(row)
+            sid = student["id"]
+            status = sign_in_map.get(sid)
+            attendance_score = 100 if status == "normal" else 80 if status == "late" else 60 if status == "leave" else 0
+
+            q = question_agg.get(sid)
+            answered = int(q["answered"] or 0) if q else 0
+            bonus_score = float(q["bonus_score"] or 0) if q else 0
+            total_questions = session_total_questions
+            question_score = 100 if total_questions == 0 else min(100, (answered / total_questions) * 60 + bonus_score * 2)
+
+            h = homework_agg.get(sid)
+            submitted_homework = int(h["submitted"] or 0) if h else 0
+            avg_homework = h["avg_homework_score"] if h else None
+            total_homework = session_total_homework
             if total_homework == 0:
                 homework_score = 100 if version_type == "final" else 80
             elif avg_homework is not None:
@@ -157,15 +189,7 @@ def calculate_session(session_id: int, version_type: str = "temporary") -> dict[
             else:
                 homework_score = (submitted_homework / total_homework) * 70
 
-            message_row = connection.execute(
-                """
-                SELECT COUNT(*) AS total
-                FROM classroom_interaction_messages
-                WHERE session_id = ? AND sender_student_id = ? AND is_deleted = 0
-                """,
-                (session_id, student["id"]),
-            ).fetchone()
-            activity_count = int(message_row["total"] or 0)
+            activity_count = message_agg.get(sid, 0)
             message_score = min(100, activity_count * 20)
             activity_score = min(100, activity_count * 15 + answered * 10 + submitted_homework * 15)
 
@@ -326,17 +350,26 @@ def get_session_report(session_id: int, version_type: str | None = None, version
     }
 
 
-def get_student_feedback(session_id: int, student_number: str, name: str) -> dict[str, Any]:
+def get_student_feedback(
+    session_id: int, student_number: str, name: str, token: str | None = None
+) -> dict[str, Any]:
     with get_connection() as connection:
         session = get_session_public(session_id)
-        student = connection.execute(
-            """
-            SELECT s.*
-            FROM students s
-            WHERE s.student_id = ? AND s.name = ? AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
-            """,
-            (student_number.strip(), name.strip(), session["id"]),
-        ).fetchone()
+        # 令牌优先：身份由服务端令牌解析并强制绑定本课堂，杜绝凭学号姓名冒名/越权读他人反馈
+        student_pk = student_auth.verify_student_token_for_session(token, session_id)
+        if student_pk is not None:
+            student = connection.execute(
+                "SELECT * FROM students WHERE id = ? AND is_active = 1", (student_pk,)
+            ).fetchone()
+        else:
+            student = connection.execute(
+                """
+                SELECT s.*
+                FROM students s
+                WHERE s.student_id = ? AND s.name = ? AND s.class_id IN (SELECT class_id FROM session_classes WHERE session_id = ?) AND s.is_active = 1
+                """,
+                (student_number.strip(), name.strip(), session["id"]),
+            ).fetchone()
         if student is None:
             raise AppError("未找到该学号，或姓名不匹配", code="STUDENT_NOT_FOUND", status_code=404)
         row = connection.execute(

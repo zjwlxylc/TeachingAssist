@@ -29,6 +29,26 @@ def _lookup_student(connection: Any, student_number: str, name: str) -> dict[str
     return _row_to_dict(row) if row else None
 
 
+def verify_student_token(token: str | None) -> int | None:
+    """校验学生会话令牌，返回 student 主键或 None（无效/过期/未提供）。"""
+    if not token:
+        return None
+    from app.services import student_auth
+
+    identity = student_auth.resolve_student_by_token(token)
+    if identity is None:
+        return None
+    return int(identity["student_id"])
+
+
+def resolve_student_pk_for_read(student_number: str, name: str, token: str | None = None) -> int:
+    """读取私信会话时解析 student 主键：强制令牌鉴权，杜绝仅凭学号+姓名冒名。"""
+    pk = verify_student_token(token)
+    if pk is None:
+        raise AppError("学生会话令牌无效或已过期", code="STUDENT_TOKEN_INVALID", status_code=401)
+    return pk
+
+
 def _load_message(connection: Any, message_id: int) -> dict[str, Any]:
     row = connection.execute(
         """
@@ -44,12 +64,22 @@ def _load_message(connection: Any, message_id: int) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
-async def send_student_message(student_number: str, name: str, content: str) -> dict[str, Any]:
+async def send_student_message(
+    student_number: str, name: str, content: str, token: str | None = None
+) -> dict[str, Any]:
     content = _validate_content(content)
+    # 强制令牌鉴权：身份由服务端令牌解析，忽略客户端传入的学号/姓名，杜绝冒名
+    if not token:
+        raise AppError("缺少学生会话令牌", code="STUDENT_TOKEN_REQUIRED", status_code=401)
+    pk = verify_student_token(token)
+    if pk is None:
+        raise AppError("学生会话令牌无效或已过期", code="STUDENT_TOKEN_INVALID", status_code=401)
     with get_connection() as connection:
-        student = _lookup_student(connection, student_number, name)
+        student = connection.execute(
+            "SELECT id, student_id, name FROM students WHERE id = ? AND is_active = 1", (pk,)
+        ).fetchone()
         if student is None:
-            raise AppError("未找到该学号，或姓名不匹配", code="STUDENT_NOT_FOUND", status_code=404)
+            raise AppError("学生不存在或已停用", code="STUDENT_NOT_FOUND", status_code=404)
         cursor = connection.execute(
             """
             INSERT INTO private_messages(
@@ -57,7 +87,7 @@ async def send_student_message(student_number: str, name: str, content: str) -> 
             )
             VALUES ('student', ?, ?, 'teacher', NULL, ?)
             """,
-            (student["id"], name.strip(), content),
+            (student["id"], str(student["name"]).strip(), content),
         )
         message = _load_message(connection, int(cursor.lastrowid))
     await message_manager.broadcast("teacher", {"type": "message.created", "message": message})
@@ -132,20 +162,13 @@ def list_conversations() -> list[dict[str, Any]]:
 
 
 def get_teacher_thread(student_pk: int) -> dict[str, Any]:
+    # 纯读：标记已读改为显式 POST /messages/students/{id}/read，避免 GET 写库副作用
     with get_connection() as connection:
         student = connection.execute(
             "SELECT id, student_id, name FROM students WHERE id = ?", (student_pk,)
         ).fetchone()
         if student is None:
             raise AppError("学生不存在", code="STUDENT_NOT_FOUND", status_code=404)
-        connection.execute(
-            """
-            UPDATE private_messages
-            SET read_at = datetime('now'), updated_at = datetime('now')
-            WHERE receiver_role = 'teacher' AND sender_student_id = ? AND read_at IS NULL
-            """,
-            (student_pk,),
-        )
         rows = connection.execute(
             """
             SELECT id, sender_role, sender_student_id, sender_name, receiver_role,
@@ -163,15 +186,8 @@ def get_teacher_thread(student_pk: int) -> dict[str, Any]:
 
 
 def get_student_thread(student_pk: int) -> list[dict[str, Any]]:
+    # 纯读：标记已读改为显式 POST /messages/mine/read，避免 GET 写库副作用
     with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE private_messages
-            SET read_at = datetime('now'), updated_at = datetime('now')
-            WHERE receiver_role = 'student' AND receiver_student_id = ? AND read_at IS NULL
-            """,
-            (student_pk,),
-        )
         rows = connection.execute(
             """
             SELECT id, sender_role, sender_student_id, sender_name, receiver_role,
@@ -183,6 +199,37 @@ def get_student_thread(student_pk: int) -> list[dict[str, Any]]:
             (student_pk, student_pk),
         ).fetchall()
     return [_row_to_dict(row) for row in rows]
+
+
+def mark_student_messages_read(token: str | None) -> int:
+    """学生标记自己私信已读（显式调用，替代 GET 内写库）。返回更新的条数。"""
+    pk = verify_student_token(token)
+    if pk is None:
+        raise AppError("学生会话令牌无效或已过期", code="STUDENT_TOKEN_INVALID", status_code=401)
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE private_messages
+            SET read_at = datetime('now'), updated_at = datetime('now')
+            WHERE receiver_role = 'student' AND receiver_student_id = ? AND read_at IS NULL
+            """,
+            (pk,),
+        )
+        return cursor.rowcount
+
+
+def mark_teacher_messages_read(student_pk: int) -> int:
+    """教师标记某学生私信已读（显式调用）。"""
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE private_messages
+            SET read_at = datetime('now'), updated_at = datetime('now')
+            WHERE receiver_role = 'teacher' AND sender_student_id = ? AND read_at IS NULL
+            """,
+            (student_pk,),
+        )
+        return cursor.rowcount
 
 
 def get_unread_count() -> dict[str, Any]:

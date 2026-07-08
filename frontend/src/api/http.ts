@@ -41,9 +41,22 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
   }
 
-  const payload = (await response.json()) as ApiResponse<T>;
+  // 容错解析：后端可能返回非 JSON（如 500 HTML 错误页、网关纯文本），
+  // 直接 response.json() 会抛难懂的 SyntaxError，这里改为 text + 安全解析。
+  const rawText = await response.text();
+  let payload: ApiResponse<T> | null = null;
+  try {
+    payload = JSON.parse(rawText) as ApiResponse<T>;
+  } catch {
+    if (!response.ok) {
+      throw new Error(`请求失败（HTTP ${response.status} ${response.statusText}）`);
+    }
+    // 2xx 但非 JSON：原样返回，避免崩溃（部分接口可能返回纯文本）
+    return rawText as unknown as T;
+  }
+
   if (!response.ok || !payload.success) {
-    throw new Error(payload.message || "请求失败");
+    throw new Error(payload.message || `请求失败（HTTP ${response.status}）`);
   }
   return payload.data;
 }

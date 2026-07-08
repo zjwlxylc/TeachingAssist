@@ -126,9 +126,43 @@ async def publish_teacher_message(session_id: int, content: str, teacher_name: s
     return message
 
 
+def _insert_moderation_log(
+    session_id: int, student: dict[str, Any], name: str, content: str, verdict: dict[str, Any]
+) -> int:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO interaction_moderation_log(
+                session_id, student_id, student_name, content, reason, status
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending')
+            """,
+            (session_id, student["id"], name.strip(), content, verdict.get("reason") or ""),
+        )
+        return int(cursor.lastrowid)
+
+
+def _insert_student_interaction_message(
+    session_id: int, student: dict[str, Any], name: str, content: str
+) -> dict[str, Any]:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO classroom_interaction_messages(
+                session_id, sender_role, sender_student_id, sender_name, content
+            )
+            VALUES (?, 'student', ?, ?, ?)
+            """,
+            (session_id, student["id"], name.strip(), content),
+        )
+        return _load_message(connection, int(cursor.lastrowid))
+
+
 async def publish_student_message(session_id: int, student_number: str, name: str, content: str) -> dict[str, Any]:
     session = get_session_public(session_id)
     content = _validate_content(content)
+
+    # 阶段 1：仅做校验（独立只读连接，不持有写锁）
     with get_connection() as connection:
         settings = _load_settings(connection, session_id)
         if not bool(settings["student_messages_enabled"]):
@@ -152,69 +186,51 @@ async def publish_student_message(session_id: int, student_number: str, name: st
         ).fetchone()
         if sign_in is None or sign_in["status"] not in {"normal", "late"}:
             raise AppError("完成正常或迟到签到后才能参与课堂互动", code="INTERACTION_SIGN_IN_REQUIRED", status_code=409)
-
-        # 全局开关：课堂互动发言 AI 甄别
         moderation_row = connection.execute(
             "SELECT interaction_moderation_enabled FROM ai_safety_settings WHERE id = 1"
         ).fetchone()
-        moderation_enabled = bool(moderation_row["interaction_moderation_enabled"]) if moderation_row else False
+    moderation_enabled = bool(moderation_row["interaction_moderation_enabled"]) if moderation_row else False
 
-        if moderation_enabled:
-            try:
-                verdict = ai_service.moderate_content(content)
-            except AppError as exc:
-                if exc.code != "AI_MODERATION_UNAVAILABLE":
-                    raise
-                # AI 不可用：兜底放行，记降级任务，不阻断课堂
-                ai_service.record_failure_task(
-                    "interaction_moderation",
-                    source_type="student_interaction",
-                    source_id=session_id,
-                    reason="AI 甄别不可用，跳过发言安全分析，直接放行",
-                    payload={"student_id": student["id"], "name": name.strip(), "content": content},
-                )
-            else:
-                if not verdict["safe"]:
-                    # 违规：写审核日志(pending)，不入库不上墙，广播给整房，再抛错给学生
-                    cursor = connection.execute(
-                        """
-                        INSERT INTO interaction_moderation_log(
-                            session_id, student_id, student_name, content, reason, status
-                        )
-                        VALUES (?, ?, ?, ?, ?, 'pending')
-                        """,
-                        (session_id, student["id"], name.strip(), content, verdict.get("reason") or ""),
-                    )
-                    log_id = int(cursor.lastrowid)
-                    await manager.broadcast(
-                        session_id,
-                        {
-                            "type": "interaction.moderated",
-                            "session_id": session_id,
-                            "log_id": log_id,
-                            "student_id": student["id"],
-                            "student_name": name.strip(),
-                            "content": content,
-                            "reason": verdict.get("reason") or "",
-                        },
-                    )
-                    raise AppError(
-                        "内容未通过审核，未上墙"
-                        + (f"：{verdict['reason']}" if verdict.get("reason") else ""),
-                        code="INTERACTION_MODERATED_BLOCKED",
-                    )
-                # 合规：继续正常入库
-
-        cursor = connection.execute(
-            """
-            INSERT INTO classroom_interaction_messages(
-                session_id, sender_role, sender_student_id, sender_name, content
+    # 阶段 2：AI 甄别（事务外调用，避免 SQLite 写锁冲突）
+    if moderation_enabled:
+        try:
+            verdict = ai_service.moderate_content(content)
+        except AppError as exc:
+            if exc.code != "AI_MODERATION_UNAVAILABLE":
+                raise
+            # AI 不可用：兜底放行，记降级任务，不阻断课堂（record_failure_task 内部独立连接，安全）
+            ai_service.record_failure_task(
+                "interaction_moderation",
+                source_type="student_interaction",
+                source_id=session_id,
+                reason="AI 甄别不可用，跳过发言安全分析，直接放行",
+                payload={"student_id": student["id"], "name": name.strip(), "content": content},
             )
-            VALUES (?, 'student', ?, ?, ?)
-            """,
-            (session_id, student["id"], name.strip(), content),
-        )
-        message = _load_message(connection, int(cursor.lastrowid))
+        else:
+            if not verdict["safe"]:
+                # 违规：写审核日志(pending)并广播，再抛错给学生；写日志使用独立连接，不在 AI 调用外层持锁。
+                log_id = _insert_moderation_log(session_id, student, name, content, verdict)
+                await manager.broadcast(
+                    session_id,
+                    {
+                        "type": "interaction.moderated",
+                        "session_id": session_id,
+                        "log_id": log_id,
+                        "student_id": student["id"],
+                        "student_name": name.strip(),
+                        "content": content,
+                        "reason": verdict.get("reason") or "",
+                    },
+                )
+                raise AppError(
+                    "内容未通过审核，未上墙"
+                    + (f"：{verdict['reason']}" if verdict.get("reason") else ""),
+                    code="INTERACTION_MODERATED_BLOCKED",
+                )
+            # 合规：继续正常入库
+
+    # 阶段 3：入库（独立写连接）
+    message = _insert_student_interaction_message(session_id, student, name, content)
     await manager.broadcast(
         session_id,
         {

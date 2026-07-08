@@ -13,12 +13,14 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 from app.services import ai as ai_service
+from app.services import student_auth
 from app.services.classroom import get_session_public
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_FILE_SIZE = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".doc", ".docx", ".pdf", ".zip", ".txt", ".jpg", ".jpeg", ".png"}
+MAX_HOMEWORK_TEXT_LENGTH = 5000
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -94,7 +96,9 @@ def _load_homework_attachments(connection: Any, homework_id: int) -> list[dict[s
 
 
 def _refresh_homework_status(connection: Any, homework_id: int | None = None) -> None:
-    where = "status = 'active' AND deadline <= ? AND allow_late = 0"
+    # 截止时间过后一律置为 closed，便于归档；allow_late=1 的迟交仍由 submit_homework
+    # 依据 allow_late 标记 'late' 后放行，不受此状态影响。
+    where = "status = 'active' AND deadline <= ?"
     params: tuple[Any, ...] = (_to_db_time(_now()),)
     if homework_id is not None:
         where += " AND id = ?"
@@ -284,6 +288,8 @@ def submit_homework(
 ) -> dict[str, Any]:
     files = [file for file in (files or []) if file.filename]
     text_content = (text_content or "").strip()
+    if len(text_content) > MAX_HOMEWORK_TEXT_LENGTH:
+        raise AppError(f"作业文本不能超过 {MAX_HOMEWORK_TEXT_LENGTH} 字", code="HOMEWORK_TEXT_TOO_LONG")
     if not text_content and not files:
         raise AppError("请填写提交内容或上传文件", code="HOMEWORK_SUBMISSION_EMPTY")
 
@@ -449,7 +455,7 @@ def start_ai_review(homework_id: int) -> dict[str, Any]:
             FROM homework_submissions hs
             JOIN students s ON s.id = hs.student_id
             WHERE hs.homework_id = ? AND hs.is_latest = 1
-              AND hs.status IN ('submitted', 'late', 'pending_review', 'ai_reviewed', 'teacher_reviewed')
+              AND hs.status IN ('submitted', 'late', 'pending_review')
             ORDER BY hs.id
             """,
             (homework_id,),
@@ -594,11 +600,23 @@ def publish_homework_grades(homework_id: int) -> dict[str, Any]:
     return {"homework_id": homework_id, "published": int(count["total"] if count else 0)}
 
 
-def get_student_homework_feedback(homework_id: int, student_number: str, name: str) -> dict[str, Any]:
+def get_student_homework_feedback(
+    homework_id: int, student_number: str, name: str, token: str | None = None
+) -> dict[str, Any]:
     with get_connection() as connection:
         homework = _load_homework(connection, homework_id)
         session = get_session_public(int(homework["session_id"]))
-        student = _resolve_student(connection, session, student_number, name)
+        # 令牌优先：强制绑定本课堂，杜绝凭学号姓名冒名/越权读他人作业反馈
+        student_pk = student_auth.verify_student_token_for_session(token, int(homework["session_id"]))
+        if student_pk is not None:
+            student = connection.execute(
+                "SELECT * FROM students WHERE id = ? AND is_active = 1", (student_pk,)
+            ).fetchone()
+            if student is None:
+                raise AppError("学生不存在或已停用", code="STUDENT_NOT_FOUND", status_code=404)
+            student = _row_to_dict(student)
+        else:
+            student = _resolve_student(connection, session, student_number, name)
         row = connection.execute(
             """
             SELECT *

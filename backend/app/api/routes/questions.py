@@ -40,6 +40,7 @@ class AnswerSubmitRequest(BaseModel):
 class DraftQueryRequest(BaseModel):
     student_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    token: str | None = None
 
 
 class BonusSettingsRequest(BaseModel):
@@ -102,7 +103,7 @@ def anonymous_question_stats(
 
 @router.post("/{question_id}/draft", response_model=ApiResponse[dict[str, object]])
 def student_draft(question_id: int, payload: DraftQueryRequest) -> ApiResponse[dict[str, object]]:
-    return ok(question_service.get_student_draft(question_id, payload.student_id, payload.name))
+    return ok(question_service.get_student_draft(question_id, payload.student_id, payload.name, payload.token))
 
 
 @router.get("/sessions/{session_id}/answers.csv")

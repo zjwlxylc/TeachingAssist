@@ -1,8 +1,10 @@
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -10,10 +12,77 @@ from urllib.request import ProxyHandler, Request, build_opener
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except Exception:  # pragma: no cover - cryptography 为可选依赖，缺失时降级为明文
+    Fernet = None
+    InvalidToken = Exception
+
 
 logger = logging.getLogger(__name__)
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_TIMEOUT_SECONDS = 5
+# API Key 静态加密前缀：标记该字段已加密，未带前缀的视为旧明文（兼容降级）
+ENCRYPTED_PREFIX = "enc::"
+_fernet_cache: Any = None
+
+
+def _get_fernet() -> Any:
+    """惰性加载/生成 Fernet 密钥，密钥文件存于 storage.local_root（与数据库同目录，不入库、不进代码）。"""
+    global _fernet_cache
+    if _fernet_cache is not None:
+        return _fernet_cache
+    if Fernet is None:
+        return None
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    key_dir = Path(settings.storage.local_root) if getattr(settings.storage, "local_root", None) else Path(".")
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_path = key_dir / "ai_secret.key"
+    if key_path.exists():
+        key = key_path.read_bytes().strip()
+    else:
+        key = Fernet.generate_key()
+        key_path.write_bytes(key)
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+    _fernet_cache = Fernet(key)
+    return _fernet_cache
+
+
+def _encrypt_api_key(plain: str | None) -> str | None:
+    """加密 API Key 后再入库；加密不可用时降级为明文以保证可用。"""
+    if not plain:
+        return None
+    fernet = _get_fernet()
+    if fernet is None:
+        return plain
+    try:
+        token = fernet.encrypt(str(plain).encode("utf-8"))
+        return f"{ENCRYPTED_PREFIX}{token.decode('utf-8')}"
+    except Exception:
+        logger.warning("API Key 加密失败，降级为明文存储")
+        return plain
+
+
+def _decrypt_api_key(stored: str | None) -> str | None:
+    """解密入库的 API Key；解密失败或旧明文数据则原样返回（兼容降级）。"""
+    if not stored:
+        return None
+    if stored.startswith(ENCRYPTED_PREFIX):
+        fernet = _get_fernet()
+        if fernet is None:
+            return stored
+        try:
+            token = stored[len(ENCRYPTED_PREFIX):].encode("utf-8")
+            return fernet.decrypt(token).decode("utf-8")
+        except (InvalidToken, Exception):
+            logger.warning("API Key 解密失败，按原文返回（可能密钥丢失）")
+            return stored
+    return stored
 
 DEGRADATION_STRATEGIES = [
     {
@@ -72,11 +141,10 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 def _redact_secret(value: str | None) -> str | None:
+    # 仅返回固定掩码，绝不暴露明文/密文前缀或首尾片段，避免信息泄漏
     if not value:
         return None
-    if len(value) <= 8:
-        return "****"
-    return f"{value[:4]}****{value[-4:]}"
+    return "****"
 
 
 def _sanitize_provider(row: dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +167,11 @@ def _active_provider(connection: Any) -> dict[str, Any] | None:
         LIMIT 1
         """
     ).fetchone()
-    return _row_to_dict(row) if row else None
+    if row is None:
+        return None
+    data = _row_to_dict(row)
+    data["api_key"] = _decrypt_api_key(data.get("api_key"))
+    return data
 
 
 def _load_safety_settings(connection: Any) -> dict[str, Any]:
@@ -184,7 +256,7 @@ def save_provider(payload: dict[str, Any], provider_id: int | None = None) -> di
                     display_name,
                     base_url,
                     model_name,
-                    str(api_key).strip() if api_key else None,
+                    _encrypt_api_key(str(api_key).strip()) if api_key else None,
                     http_proxy,
                     enabled,
                     "unknown" if enabled else "disabled",
@@ -210,7 +282,7 @@ def save_provider(payload: dict[str, Any], provider_id: int | None = None) -> di
                 fields.append("api_key = NULL")
             elif isinstance(api_key, str) and api_key.strip():
                 fields.append("api_key = ?")
-                values.append(api_key.strip())
+                values.append(_encrypt_api_key(api_key.strip()))
             values.append(provider_id)
             connection.execute(f"UPDATE ai_provider_configs SET {', '.join(fields)} WHERE id = ?", values)
         row = connection.execute("SELECT * FROM ai_provider_configs WHERE id = ?", (provider_id,)).fetchone()
@@ -271,6 +343,7 @@ def _post_chat_completion(
     messages: list[dict[str, str]],
     response_format: dict[str, str] | None = None,
     temperature: float = 0.2,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS * 3,
 ) -> str:
     if not provider.get("enabled") or not provider.get("api_key"):
         raise AppError("AI 不可用，系统进入降级模式", code="AI_UNAVAILABLE")
@@ -295,7 +368,7 @@ def _post_chat_completion(
     proxy = str(provider.get("http_proxy") or "").strip()
     opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}) if proxy else ProxyHandler({}))
     try:
-        with opener.open(request, timeout=DEFAULT_TIMEOUT_SECONDS * 3) as response:
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
         if exc.code in {401, 403}:
@@ -306,10 +379,10 @@ def _post_chat_completion(
     except (URLError, TimeoutError) as exc:
         raise AppError("AI 网络不可达或请求超时", code="AI_NETWORK_FAILED") from exc
 
-    data = json.loads(raw)
     try:
+        data = json.loads(raw)
         return str(data["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError) as exc:
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise AppError("AI 返回格式异常", code="AI_RESPONSE_INVALID") from exc
 
 
@@ -317,13 +390,16 @@ def generate_chat(
     messages: list[dict[str, str]],
     temperature: float = 0.2,
     response_format: dict[str, str] | None = None,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS * 3,
 ) -> str:
     """通用聊天补全，供 AI 课堂等对话场景复用（需已配置并启用 Provider）。"""
     with get_connection() as connection:
         provider = _active_provider(connection)
     if provider is None:
         raise AppError("未配置 AI Provider", code="AI_PROVIDER_NOT_CONFIGURED")
-    return _post_chat_completion(provider, messages, response_format=response_format, temperature=temperature)
+    return _post_chat_completion(
+        provider, messages, response_format=response_format, temperature=temperature, timeout=timeout
+    )
 
 
 def generate_structured_json(
@@ -349,7 +425,8 @@ def generate_structured_json(
                 ],
                 {"type": "json_object"},
             )
-            safety = check_content_safety(content, source_type or scenario, source_id)
+            # 结构化生成场景：关闭截断与关键词替换，避免破坏 JSON 结构导致 json.loads 失败而降级。
+            safety = check_content_safety(content, source_type or scenario, source_id, truncate=False, replace_keywords=False)
             if safety["blocked"]:
                 raise AppError("AI 返回内容未通过安全检查", code="AI_CONTENT_BLOCKED")
             parsed = json.loads(safety["text"])
@@ -375,6 +452,8 @@ def check_connectivity(provider_id: int | None = None) -> dict[str, Any]:
         else:
             row = connection.execute("SELECT * FROM ai_provider_configs WHERE id = ?", (provider_id,)).fetchone()
             provider = _row_to_dict(row) if row else None
+            if provider is not None:
+                provider["api_key"] = _decrypt_api_key(provider.get("api_key"))
         if provider is None:
             raise AppError("未配置 AI Provider", code="AI_PROVIDER_NOT_CONFIGURED", status_code=404)
 
@@ -453,7 +532,14 @@ def set_interaction_moderation_enabled(enabled: bool) -> dict[str, Any]:
         return _load_safety_settings(connection)
 
 
-def check_content_safety(text: str, source_type: str = "manual_test", source_id: int | None = None, blocked_keywords: list[str] | None = None) -> dict[str, Any]:
+def check_content_safety(
+    text: str,
+    source_type: str = "manual_test",
+    source_id: int | None = None,
+    blocked_keywords: list[str] | None = None,
+    truncate: bool = True,
+    replace_keywords: bool = True,
+) -> dict[str, Any]:
     original = str(text or "")
     with get_connection() as connection:
         settings = _load_safety_settings(connection)
@@ -465,7 +551,7 @@ def check_content_safety(text: str, source_type: str = "manual_test", source_id:
     matched_keywords: list[str] = []
     action = "pass"
     max_length = int(settings["max_length"])
-    if len(sanitized) > max_length:
+    if truncate and len(sanitized) > max_length:
         sanitized = sanitized[:max_length]
         action = "truncate"
 
@@ -473,7 +559,9 @@ def check_content_safety(text: str, source_type: str = "manual_test", source_id:
         pattern = re.compile(re.escape(str(keyword)), re.IGNORECASE)
         if pattern.search(sanitized):
             matched_keywords.append(str(keyword))
-            if settings["keyword_action"] == "replace":
+            # 结构化输出（如作业批阅 JSON）不应做关键词替换，否则会破坏字段/数值；
+            # 此时统一按 block 判定，由调用方决定降级。
+            if settings["keyword_action"] == "replace" and replace_keywords:
                 sanitized = pattern.sub("***", sanitized)
                 action = "replace"
             else:

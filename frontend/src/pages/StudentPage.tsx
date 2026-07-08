@@ -63,6 +63,7 @@ import {
   MessageCreated,
   PrivateMessage,
   fetchStudentThread,
+  markStudentMessagesRead,
   messageSocketUrl,
   sendStudentMessage
 } from "../api/messages";
@@ -152,6 +153,7 @@ export function StudentPage() {
   const [studentId, setStudentId] = useState("");
   const [name, setName] = useState("");
   const [result, setResult] = useState<StudentSignInResult | null>(null);
+  const [studentToken, setStudentToken] = useState<string | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [announcementUnread, setAnnouncementUnread] = useState(0);
   const [interactionUnread, setInteractionUnread] = useState(0);
@@ -213,6 +215,8 @@ export function StudentPage() {
     setQuestions([]);
     setHomeworkList([]);
     setSubmittedQuestions({});
+    setResult(null); // 切换课堂时清空上一课堂的签到结果，避免旧 result 误判已签到
+    setStudentToken(null); // 令牌与(学生,课堂)绑定，切换课堂即失效
     lastAnnouncementIdRef.current = 0;
     lastInteractionMessageIdRef.current = 0;
     if (!currentSession?.id) {
@@ -319,12 +323,15 @@ export function StudentPage() {
   }, [currentSession?.id]);
 
   useEffect(() => {
-    if (!studentId || !name) {
+    if (!studentId || !name || !studentToken) {
       setPrivateMessages([]);
       lastPrivateMessageIdRef.current = 0;
       return undefined;
     }
     let disposed = false;
+    // 切换身份/令牌时先清空上一身份的私信，避免跨身份串号混显
+    setPrivateMessages([]);
+    lastPrivateMessageIdRef.current = 0;
     const mergePrivateMessages = (items: PrivateMessage[]) => {
       items.forEach((item) => {
         lastPrivateMessageIdRef.current = Math.max(lastPrivateMessageIdRef.current, item.id);
@@ -337,9 +344,13 @@ export function StudentPage() {
     };
     const loadThread = async () => {
       try {
-        const items = await fetchStudentThread(studentId, name);
+        const items = await fetchStudentThread(studentId, name, studentToken);
         if (!disposed) {
           mergePrivateMessages(items);
+          // 打开会话即显式标记已读（替代原先 GET 内写库），并刷新未读计数
+          if (studentToken) {
+            void markStudentMessagesRead(studentToken).catch(() => undefined);
+          }
         }
       } catch (err) {
         if (!disposed) {
@@ -349,7 +360,7 @@ export function StudentPage() {
     };
     loadThread();
     const socket = new TeachingAssistSocket(
-      messageSocketUrl(undefined, studentId, name),
+      messageSocketUrl(studentToken ?? undefined),
       (event) => {
         const payload = JSON.parse(event.data) as MessageCreated;
         if (payload.type === "message.created" && payload.message.receiver_role === "student") {
@@ -369,7 +380,7 @@ export function StudentPage() {
       socket.close();
       privateSocketRef.current = null;
     };
-  }, [studentId, name]);
+  }, [studentId, name, studentToken]);
 
   async function handleSendPrivateMessage() {
     if (!studentId || !name) {
@@ -381,10 +392,10 @@ export function StudentPage() {
       return;
     }
     try {
-      await sendStudentMessage(studentId, name, privateContent);
+      await sendStudentMessage(studentId, name, privateContent, studentToken);
       setPrivateContent("");
       setMessage("私信已发送");
-      const items = await fetchStudentThread(studentId, name);
+      const items = await fetchStudentThread(studentId, name, studentToken);
       setPrivateMessages(items);
       lastPrivateMessageIdRef.current = items.reduce((max, item) => Math.max(max, item.id), 0);
     } catch (err) {
@@ -470,7 +481,7 @@ export function StudentPage() {
     const entries = await Promise.all(
       questionItems.map(async (question) => {
         try {
-          const draft = await fetchQuestionDraft(question.id, studentId, name);
+          const draft = await fetchQuestionDraft(question.id, studentId, name, studentToken);
           return [question.id, draft.answer ?? draft.answer_text] as const;
         } catch {
           return [question.id, undefined] as const;
@@ -526,6 +537,7 @@ export function StudentPage() {
     try {
       const signInResult = await studentSignIn(sessionId, studentId, name);
       setResult(signInResult);
+      setStudentToken(signInResult.token ?? null);
       setMessage(signInResult.duplicate ? "你已经完成过签到" : "签到成功");
     } catch (err) {
       setError((err as Error).message);
@@ -670,7 +682,7 @@ export function StudentPage() {
       return;
     }
     try {
-      const feedback = await fetchHomeworkFeedback(homework.id, studentId, name);
+      const feedback = await fetchHomeworkFeedback(homework.id, studentId, name, studentToken);
       setHomeworkFeedback((current) => ({ ...current, [homework.id]: feedback }));
       setMessage(feedback.published ? "作业反馈已获取" : "教师尚未发布该作业成绩");
     } catch (err) {
@@ -685,7 +697,7 @@ export function StudentPage() {
       return;
     }
     try {
-      const feedback = await fetchStudentEvaluationFeedback(sessionId, studentId, name);
+      const feedback = await fetchStudentEvaluationFeedback(sessionId, studentId, name, studentToken);
       setEvaluationFeedback(feedback);
       setMessage(feedback.evaluation ? "学习反馈已获取" : "教师尚未生成课堂评估");
     } catch (err) {
@@ -1071,6 +1083,7 @@ export function StudentPage() {
                             onChange={(event) =>
                               setHomeworkText((current) => ({ ...current, [homework.id]: event.target.value }))
                             }
+                            inputProps={{ maxLength: 5000 }}
                             multiline
                             minRows={3}
                             fullWidth

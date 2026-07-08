@@ -131,10 +131,30 @@ def run_startup_checks(settings: AppSettings) -> dict[str, object]:
 async def auto_backup_worker(interval_seconds: int = 900) -> None:
     from app.services.backup import create_backup
 
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            create_backup("auto")
+            # SQLite 备份是同步阻塞 I/O，放到线程池执行，避免阻塞事件循环拖慢所有请求。
+            await loop.run_in_executor(None, create_backup, "auto")
             logger.info("Automatic database backup completed")
         except Exception:
             logger.exception("Automatic database backup failed")
+
+
+async def session_status_worker(interval_seconds: int = 60) -> None:
+    """周期性刷新课堂状态（自动开始/结束），替代原先在 GET 读接口里刷新导致的读路径写副作用。
+
+    将写库逻辑从读路径移到后台定时任务，避免 GET 请求改库状态、触发备份写入、
+    以及在并发读下加剧 SQLite 写锁竞争。
+    """
+    from app.services.classroom import refresh_session_statuses
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            changed = refresh_session_statuses()
+            if changed:
+                logger.info("Session status refreshed by background worker, changed=%s", changed)
+        except Exception:
+            logger.exception("Background session status refresh failed")

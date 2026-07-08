@@ -1,10 +1,12 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
 from app.services import announcements as announcement_service
-from app.services.realtime import manager
+from app.services.realtime import WS_IDLE_TIMEOUT_SECONDS, manager
 
 
 router = APIRouter(prefix="/announcements", tags=["announcements"])
@@ -41,8 +43,14 @@ async def classroom_websocket(websocket: WebSocket, session_id: int) -> None:
     await manager.connect(session_id, websocket)
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=WS_IDLE_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                # 空闲超时：主动关闭以释放长期“连而不发”的连接。
+                break
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
     except Exception:
+        manager.disconnect(session_id, websocket)
+    finally:
         manager.disconnect(session_id, websocket)

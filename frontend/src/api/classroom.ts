@@ -39,6 +39,7 @@ export interface StudentSignInResult {
   status: "normal" | "late" | "absent";
   sign_time: string | null;
   duplicate: boolean;
+  token?: string;
   device_warning?: {
     level: "warning" | "critical";
     message: string;

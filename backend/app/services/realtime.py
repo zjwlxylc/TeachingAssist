@@ -9,6 +9,14 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
+# 单条 send 的最长等待时间：个别卡死/慢速 socket 超过该时间即判定为失联并剔除，
+# 避免 asyncio.gather 被单点拖住、拖累整组广播。
+SEND_TIMEOUT_SECONDS = 5.0
+
+# WebSocket 空闲超时：客户端长时间不发任何消息（包括心跳）即由服务端主动关闭，
+# 释放被“连而不发”占用的连接资源。前端具备重连机制，断开后会自动恢复。
+WS_IDLE_TIMEOUT_SECONDS = 300.0
+
 
 class ConnectionManager:
     def __init__(self) -> None:
@@ -34,7 +42,7 @@ class ConnectionManager:
 
         async def _safe_send(ws: WebSocket) -> WebSocket | None:
             try:
-                await ws.send_text(message)
+                await asyncio.wait_for(ws.send_text(message), timeout=SEND_TIMEOUT_SECONDS)
                 return None
             except Exception:
                 return ws

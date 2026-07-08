@@ -51,14 +51,12 @@ def _token_hash(token: str) -> str:
 
 
 def _get_teacher() -> dict[str, object]:
+    # 纯查询：迁移 002 已保证 teachers(id=1) 存在并完成名称修正，
+    # 不应在读取路径里做 INSERT/UPDATE，否则并发时可能触发未捕获的 IntegrityError(500)。
     with get_connection() as connection:
         row = connection.execute("SELECT * FROM teachers WHERE id = 1").fetchone()
-        if row is None:
-            connection.execute("INSERT INTO teachers(id, name) VALUES (1, '教师')")
-            row = connection.execute("SELECT * FROM teachers WHERE id = 1").fetchone()
-        elif row["name"] in ("", "鏁欏笀"):
-            connection.execute("UPDATE teachers SET name = '教师', updated_at = datetime('now') WHERE id = 1")
-            row = connection.execute("SELECT * FROM teachers WHERE id = 1").fetchone()
+    if row is None:
+        raise AppError("教师账户不存在，请检查数据库初始化", code="TEACHER_NOT_FOUND")
     return dict(row)
 
 

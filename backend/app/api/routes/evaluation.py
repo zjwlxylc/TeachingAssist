@@ -24,6 +24,7 @@ class EvaluationWeightsRequest(BaseModel):
 class StudentFeedbackRequest(BaseModel):
     student_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    token: str | None = None
 
 
 @router.post("/sessions/{session_id}/calculate", response_model=ApiResponse[dict[str, object]])
@@ -53,7 +54,7 @@ def update_weights(
 
 @router.post("/sessions/{session_id}/student-feedback", response_model=ApiResponse[dict[str, object]])
 def student_feedback(session_id: int, payload: StudentFeedbackRequest) -> ApiResponse[dict[str, object]]:
-    return ok(evaluation_service.get_student_feedback(session_id, payload.student_id, payload.name))
+    return ok(evaluation_service.get_student_feedback(session_id, payload.student_id, payload.name, payload.token))
 
 
 @router.get("/sessions/{session_id}.csv")

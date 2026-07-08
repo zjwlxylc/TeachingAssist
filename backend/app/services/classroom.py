@@ -8,6 +8,7 @@ from typing import Any
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 from app.services.backup import create_backup
+from app.services import student_auth
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -283,7 +284,7 @@ def end_session(session_id: int) -> dict[str, Any]:
 
 
 def get_session_public(session_id: int) -> dict[str, Any]:
-    refresh_session_statuses()
+    # 注意：不在读路径刷新状态，避免 GET 请求产生写库副作用（由后台 session_status_worker 周期性刷新）。
     with get_connection() as connection:
         session = _load_session(connection, session_id)
         session["roster_count"] = _roster_count(connection, session)
@@ -291,7 +292,7 @@ def get_session_public(session_id: int) -> dict[str, Any]:
 
 
 def list_active_sessions() -> list[dict[str, Any]]:
-    refresh_session_statuses()
+    # 注意：状态由后台 session_status_worker 周期性刷新，这里只做纯读，避免读路径写副作用。
     with get_connection() as connection:
         rows = connection.execute(
             """
@@ -356,6 +357,8 @@ def student_sign_in(
         if existing is not None:
             result = _row_to_dict(existing)
             result["duplicate"] = True
+            # 重复签到也发放/轮换令牌，保证学生拿到有效私信身份
+            result["token"] = student_auth.create_student_session(int(student["id"]), session_id)
             return result
 
         # 浏览器会话检测
@@ -399,6 +402,8 @@ def student_sign_in(
     result["duplicate"] = False
     if device_warning:
         result["device_warning"] = device_warning
+    # 发放学生会话令牌，用于私信读/发鉴权（替代仅靠学号+姓名的弱身份）
+    result["token"] = student_auth.create_student_session(int(student["id"]), session_id)
     return result
 
 

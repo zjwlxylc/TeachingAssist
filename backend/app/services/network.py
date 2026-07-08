@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 
 from app.core.config import get_settings
+from app.db.session import get_connection
 
 
 VIRTUAL_KEYWORDS = ("vmware", "virtual", "docker", "hyper-v", "loopback", "wsl", "蓝牙")
@@ -69,11 +70,38 @@ def choose_access_port() -> dict[str, object]:
     return {"port": settings.server.port, "available": False, "fallback_used": False}
 
 
+def save_selected_access(selected_ip: str | None, selected_port: int | None) -> None:
+    """将教师选择的访问 IP / 端口持久化到 network_settings，重启后仍生效。"""
+    with get_connection() as connection:
+        if selected_ip is not None:
+            connection.execute(
+                "INSERT INTO network_settings(key, value, updated_at) VALUES ('selected_ip', ?, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+                (selected_ip,),
+            )
+        if selected_port is not None:
+            connection.execute(
+                "INSERT INTO network_settings(key, value, updated_at) VALUES ('selected_port', ?, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+                (str(selected_port),),
+            )
+
+
+def load_selected_access() -> tuple[str | None, int | None]:
+    with get_connection() as connection:
+        ip_row = connection.execute("SELECT value FROM network_settings WHERE key='selected_ip'").fetchone()
+        port_row = connection.execute("SELECT value FROM network_settings WHERE key='selected_port'").fetchone()
+    ip = ip_row["value"] if ip_row else None
+    port = int(port_row["value"]) if port_row and str(port_row["value"]).isdigit() else None
+    return ip, port
+
+
 def get_access_info(selected_ip: str | None = None, selected_port: int | None = None) -> dict[str, object]:
     candidates = list_network_candidates()
-    ip = selected_ip or str(candidates[0]["ip"])
+    stored_ip, stored_port = load_selected_access()
+    ip = selected_ip or stored_ip or str(candidates[0]["ip"])
     port_info = choose_access_port()
-    port = selected_port or int(port_info["port"])
+    port = selected_port or stored_port or int(port_info["port"])
     return {
         "candidates": candidates,
         "selected_ip": ip,

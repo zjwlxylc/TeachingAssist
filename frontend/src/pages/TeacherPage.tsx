@@ -177,6 +177,7 @@ import {
   fetchConversations,
   fetchTeacherThread,
   fetchUnreadCount,
+  markTeacherMessagesRead,
   messageSocketUrl,
   replyToStudent
 } from "../api/messages";
@@ -335,6 +336,8 @@ export function TeacherPage() {
   const [messageUnreadTotal, setMessageUnreadTotal] = useState(0);
   const [interactionUnread, setInteractionUnread] = useState(0);
   const messageSocketRef = useRef<TeachingAssistSocket | null>(null);
+  // 持有最新选中的私信会话 student_pk，供 WS 回调读取，避免切换会话时重建 WS 连接与轮询
+  const selectedMessageStudentPkRef = useRef<number | "">(selectedMessageStudentPk);
   const [questionSessionId, setQuestionSessionId] = useState<number | "">("");
   const [questionTitle, setQuestionTitle] = useState("");
   const [questionContent, setQuestionContent] = useState("");
@@ -399,6 +402,11 @@ export function TeacherPage() {
   useEffect(() => {
     activeTeacherSectionRef.current = activeTeacherSection;
   }, [activeTeacherSection]);
+
+  // 私信选中会话最新值同步到 ref（WS 回调读取，避免重建连接）
+  useEffect(() => {
+    selectedMessageStudentPkRef.current = selectedMessageStudentPk;
+  }, [selectedMessageStudentPk]);
 
   // error 自动消失：5 秒后清空，用户手动关闭则取消计时器
   const teacherErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1086,6 +1094,8 @@ export function TeacherPage() {
       const thread = await fetchTeacherThread(studentPk);
       setMessageThreadStudent(thread.student);
       setMessageThread(thread.messages);
+      // 打开会话即显式标记已读（替代原先 GET 内写库）
+      await markTeacherMessagesRead(studentPk).catch(() => undefined);
       await handleLoadConversations();
     } catch (err) {
       setError((err as Error).message);
@@ -1121,10 +1131,12 @@ export function TeacherPage() {
         if (payload.type === "message.created" && payload.message.sender_role === "student") {
           const pk = payload.message.sender_student_id;
           void handleLoadConversations();
-          if (pk != null && pk === selectedMessageStudentPk) {
+          // 读取 ref 中的最新选中会话，避免把 selectedMessageStudentPk 纳入依赖导致切换会话重建连接/轮询
+          if (pk != null && pk === selectedMessageStudentPkRef.current) {
             void fetchTeacherThread(pk).then((thread) => {
               setMessageThread(thread.messages);
               setMessage(`收到 ${thread.student.name} 的新私信`);
+              void markTeacherMessagesRead(pk).catch(() => undefined);
             });
           } else {
             setMessage(`收到来自 ${payload.message.sender_name} 的新私信`);
@@ -1142,7 +1154,7 @@ export function TeacherPage() {
       messageSocketRef.current = null;
       window.clearInterval(timer);
     };
-  }, [isAuthenticated, activeTeacherSection, selectedMessageStudentPk]);
+  }, [isAuthenticated, activeTeacherSection]);
 
   // 课堂互动 WebSocket：只要已选定互动课堂（无论是否停留在互动模块）就保持监听，
   // 这样老师不在互动模块时也能通过左栏红点感知新留言。

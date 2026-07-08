@@ -13,6 +13,7 @@
 
 import json
 import logging
+import time
 from typing import Any
 
 from app.core.exceptions import AppError
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 MAX_HISTORY = 20
 DATA_INTENTS = {"sign_in", "homework", "answers", "evaluation"}
+# 单次 AI 课堂请求的整体超时预算（秒）。分类器各用较短超时，主生成用默认 15s，
+# 预算守卫确保任何一个 Provider 异常慢时请求不会无限拖延，而是优雅降级。
+AI_CHAT_OVERALL_BUDGET_SECONDS = 28
+CLASSIFIER_TIMEOUT_SECONDS = 8
 
 
 def _refusal_message(course_name: str) -> str:
@@ -92,6 +97,7 @@ def _classify_relevance(question: str, course_name: str) -> bool:
                 {"role": "user", "content": question},
             ],
             temperature=0,
+            timeout=CLASSIFIER_TIMEOUT_SECONDS,
         )
         parsed = _extract_json(content)
         if parsed is None:
@@ -122,6 +128,7 @@ def _classify_intent(question: str) -> str:
                 {"role": "user", "content": question},
             ],
             temperature=0,
+            timeout=CLASSIFIER_TIMEOUT_SECONDS,
         )
         parsed = _extract_json(content)
         if parsed is None:
@@ -304,6 +311,7 @@ def run_ai_class_chat(
     if not isinstance(messages, list) or not messages:
         raise AppError("消息不能为空", code="AI_CHAT_EMPTY")
     messages = messages[-MAX_HISTORY:]
+    start_time = time.monotonic()
 
     # 校验课堂存在（同时拿到课程名）
     session = get_session_public(session_id)
@@ -341,6 +349,15 @@ def run_ai_class_chat(
 
     # 2) 意图路由
     intent = _classify_intent(last_user)
+
+    # 整体超时预算守卫：分类阶段已耗时过多时，不再发起主生成，避免单请求无限拖延
+    if time.monotonic() - start_time > AI_CHAT_OVERALL_BUDGET_SECONDS:
+        logger.warning("AI 课堂整体耗时超限，跳过主生成步骤（intent=%s）", intent)
+        return {
+            "reply": "AI 课堂生成超时，请稍后重试，或在 AI 管理中检查 Provider 配置。",
+            "intent": intent,
+            "guarded": False,
+        }
 
     # 3) 生成或查库总结（AI 调用可能因网络/Provider/模型问题失败）
     try:

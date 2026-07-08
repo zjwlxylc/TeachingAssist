@@ -7,6 +7,7 @@ from typing import Any
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 from app.services import ai as ai_service
+from app.services import student_auth
 from app.services.classroom import get_session_public
 from app.services.realtime import manager
 
@@ -472,6 +473,22 @@ def _resolve_student(connection: Any, session: dict[str, Any], student_number: s
     return student
 
 
+def _resolve_student_token_first(
+    connection: Any, session_id: int, student_number: str, name: str, token: str | None
+) -> dict[str, Any]:
+    """令牌优先解析学生身份（强制绑定本课堂）；无有效令牌时回退到学号+姓名+课堂名单校验。"""
+    student_pk = student_auth.verify_student_token_for_session(token, session_id)
+    if student_pk is not None:
+        student = connection.execute(
+            "SELECT * FROM students WHERE id = ? AND is_active = 1", (student_pk,)
+        ).fetchone()
+        if student is None:
+            raise AppError("学生不存在或已停用", code="STUDENT_NOT_FOUND", status_code=404)
+        return _row_to_dict(student)
+    session = get_session_public(session_id)
+    return _resolve_student(connection, session, student_number, name)
+
+
 def _grade_answer(question: dict[str, Any], answer: Any, status: str) -> tuple[int | None, float]:
     if status != "submitted":
         return None, 0
@@ -491,7 +508,12 @@ def _grade_answer(question: dict[str, Any], answer: Any, status: str) -> tuple[i
         is_correct = expected == actual
         return (1 if is_correct else 0), score if is_correct else 0
     if question_type == "fill_blank":
-        actual_text = _normalize_text(answer).lower()
+        # 兼容字符串与列表两种提交：统一归一化为词列表后拼接比较，
+        # 避免 answer 为 list 时被 str(list) 变成 "['a']" 导致永远无法命中标准答案。
+        actual_list = _normalize_answer_list(answer)
+        if not actual_list:
+            return 0, 0
+        actual_text = " ".join(actual_list).lower()
         standard_answers = [_normalize_text(item).lower() for item in _normalize_answer_list(correct_answer)]
         keyword_answers = [_normalize_text(item).lower() for item in keywords]
         is_correct = actual_text in standard_answers if standard_answers else False
@@ -694,11 +716,13 @@ def get_anonymous_question_stats(question_id: int) -> dict[str, Any]:
     return stats
 
 
-def get_student_draft(question_id: int, student_number: str, name: str) -> dict[str, Any]:
+def get_student_draft(
+    question_id: int, student_number: str, name: str, token: str | None = None
+) -> dict[str, Any]:
     with get_connection() as connection:
         question = _load_question(connection, question_id)
-        session = get_session_public(int(question["session_id"]))
-        student = _resolve_student(connection, session, student_number, name)
+        # 令牌优先：强制绑定本课堂，杜绝凭学号姓名冒名/越权读他人草稿
+        student = _resolve_student_token_first(connection, int(question["session_id"]), student_number, name, token)
         row = connection.execute(
             """
             SELECT *
@@ -718,11 +742,13 @@ def get_student_draft(question_id: int, student_number: str, name: str) -> dict[
     }
 
 
-def get_student_answer_summary(session_id: int, student_number: str, name: str) -> dict[str, Any]:
+def get_student_answer_summary(
+    session_id: int, student_number: str, name: str, token: str | None = None
+) -> dict[str, Any]:
     """返回该生在本课堂每题的最新作答、判分与状态（供 AI 课堂"我的答题"使用）。"""
     with get_connection() as connection:
-        session = get_session_public(session_id)
-        student = _resolve_student(connection, session, student_number, name)
+        # 令牌优先（学生端）；AI 课堂服务端调用时 token=None，回退学号+姓名
+        student = _resolve_student_token_first(connection, session_id, student_number, name, token)
         rows = connection.execute(
             """
             SELECT q.id, q.title, q.question_type, q.score,

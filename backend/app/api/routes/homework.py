@@ -25,6 +25,7 @@ class HomeworkReviewRequest(BaseModel):
 class HomeworkFeedbackRequest(BaseModel):
     student_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
+    token: str | None = None
 
 
 @router.post("/sessions/{session_id}", response_model=ApiResponse[dict[str, object]])
@@ -110,7 +111,7 @@ def publish_grades(
 
 @router.post("/{homework_id}/feedback", response_model=ApiResponse[dict[str, object]])
 def student_feedback(homework_id: int, payload: HomeworkFeedbackRequest) -> ApiResponse[dict[str, object]]:
-    return ok(homework_service.get_student_homework_feedback(homework_id, payload.student_id, payload.name))
+    return ok(homework_service.get_student_homework_feedback(homework_id, payload.student_id, payload.name, payload.token))
 
 
 @router.get("/{homework_id}/submissions.csv")

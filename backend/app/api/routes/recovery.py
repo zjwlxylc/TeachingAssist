@@ -51,7 +51,11 @@ def apply_action(
 
 
 @router.post("/sessions/{session_id}/cached-replays", response_model=ApiResponse[dict[str, object]])
-def cached_replay(session_id: int, payload: CachedReplayRequest) -> ApiResponse[dict[str, object]]:
+def cached_replay(
+    session_id: int,
+    payload: CachedReplayRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
     return ok(recovery_service.record_cached_replay(session_id, payload.payload), message="缓存请求已记录")
 
 
