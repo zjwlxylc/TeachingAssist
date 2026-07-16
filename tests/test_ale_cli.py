@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +67,88 @@ class AleCliTests(unittest.TestCase):
     def test_ale_run_evidence_is_ignored(self) -> None:
         ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn(".ale-runs/", ignored)
+
+    def test_failure_classification_preserves_first_failure(self) -> None:
+        module = load_ale_cli()
+        self.assertEqual(module.classify_failure(1, 0, 1), "branch_regression")
+        self.assertEqual(module.classify_failure(1, 1, 1), "baseline_failure")
+        self.assertEqual(module.classify_failure(1, None, 0), "gate_unstable")
+        self.assertEqual(module.classify_failure(1, None, None), "unclassified")
+
+    def test_summary_redacts_common_secret_shapes(self) -> None:
+        module = load_ale_cli()
+        raw = "Authorization: Bearer abcdefghijk api_key=sk-1234567890abcdef"
+        cleaned = module.sanitize_summary(raw)
+        self.assertNotIn("abcdefghijk", cleaned)
+        self.assertNotIn("sk-1234567890abcdef", cleaned)
+        self.assertIn("[REDACTED]", cleaned)
+
+    def test_provenance_requires_distinct_frozen_baseline_checkout(self) -> None:
+        module = load_ale_cli()
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / ".ale-runs"
+            with self.assertRaises(ValueError):
+                module.run_provenance(
+                    task_id="ALE-TEST",
+                    command=["python", "-c", "raise SystemExit(1)"],
+                    current_root=ROOT,
+                    baseline_root=ROOT,
+                    baseline_commit="4ed88a90a07ff44383be17ade63eb4e677e053df",
+                    output_root=output,
+                )
+
+    def test_provenance_evidence_keeps_the_first_exit_code(self) -> None:
+        module = load_ale_cli()
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            baseline_root = temporary / "baseline"
+            baseline_root.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "ale@example.invalid"],
+                cwd=baseline_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "ALE Test"],
+                cwd=baseline_root,
+                check=True,
+            )
+            (baseline_root / "baseline.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "baseline.txt"], cwd=baseline_root, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "baseline"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+            )
+            baseline_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout.strip()
+            first_exit, evidence_path = module.run_provenance(
+                task_id="ALE-TEST",
+                command=[sys.executable, "-c", "raise SystemExit(5)"],
+                current_root=ROOT,
+                baseline_root=baseline_root,
+                baseline_commit=baseline_commit,
+                output_root=temporary / ".ale-runs",
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_exit, 5)
+            self.assertEqual(evidence["first_run"]["exit_code"], 5)
+            self.assertEqual(evidence["classification"], "baseline_failure")
 
 
 if __name__ == "__main__":

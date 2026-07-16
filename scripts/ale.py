@@ -5,11 +5,17 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_TARGETS = ("control-plane", "backend", "frontend")
+SECRET_PATTERNS = (
+    re.compile(r"(?i)Authorization:\s*Bearer\s+\S+"),
+    re.compile(r"(?i)(api[_-]?key|password|secret|token)\s*[:=]\s*\S+"),
+    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,131 @@ def _capture(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def classify_failure(
+    first_exit: int,
+    baseline_exit: int | None,
+    rerun_exit: int | None,
+) -> str:
+    if first_exit == 0:
+        raise ValueError("provenance requires an observed first failure")
+    if rerun_exit == 0:
+        return "gate_unstable"
+    if baseline_exit == 0:
+        return "branch_regression"
+    if baseline_exit is not None:
+        return "baseline_failure"
+    return "unclassified"
+
+
+def sanitize_summary(text: str) -> str:
+    cleaned = text
+    for pattern in SECRET_PATTERNS:
+        cleaned = pattern.sub("[REDACTED]", cleaned)
+    return cleaned[:4000]
+
+
+def _provenance_run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    try:
+        return _capture(command, cwd)
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+
+
+def _git_value(root: Path, *args: str) -> str:
+    completed = _capture(
+        ["git", "-c", "core.quotepath=false", *args],
+        root,
+    )
+    if completed.returncode != 0:
+        raise ValueError(completed.stderr.strip() or "Git identity check failed")
+    return completed.stdout.strip()
+
+
+def _run_evidence(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    combined = "\n".join(
+        part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+    )
+    return {
+        "exit_code": completed.returncode,
+        "output_summary": sanitize_summary(combined),
+    }
+
+
+def run_provenance(
+    task_id: str,
+    command: list[str],
+    current_root: Path,
+    baseline_root: Path,
+    baseline_commit: str,
+    output_root: Path,
+) -> tuple[int, Path]:
+    current = current_root.resolve()
+    baseline = baseline_root.resolve()
+    if current == baseline:
+        raise ValueError("baseline_root must be a distinct frozen checkout")
+    if not command:
+        raise ValueError("provenance requires a command")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", task_id) is None:
+        raise ValueError("task_id must contain only letters, digits, dot, underscore, or dash")
+
+    current_git_root = Path(_git_value(current, "rev-parse", "--show-toplevel")).resolve()
+    if current_git_root != current:
+        raise ValueError("current_root must be a Git checkout root")
+    baseline_git_root = Path(
+        _git_value(baseline, "rev-parse", "--show-toplevel")
+    ).resolve()
+    if baseline_git_root != baseline:
+        raise ValueError("baseline_root must be a Git checkout root")
+    actual_baseline = _git_value(baseline, "rev-parse", "HEAD")
+    if actual_baseline != baseline_commit:
+        raise ValueError(
+            f"baseline checkout HEAD is {actual_baseline}, expected {baseline_commit}"
+        )
+
+    current_branch = _git_value(current, "branch", "--show-current")
+    current_head = _git_value(current, "rev-parse", "HEAD")
+    first = _provenance_run(command, current)
+    if first.returncode == 0:
+        raise ValueError("provenance command passed; no first failure was observed")
+    baseline_result = _provenance_run(command, baseline)
+    rerun = _provenance_run(command, current)
+    classification = classify_failure(
+        first.returncode,
+        baseline_result.returncode,
+        rerun.returncode,
+    )
+
+    timestamp = datetime.now(timezone.utc)
+    evidence = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "timestamp_utc": timestamp.isoformat().replace("+00:00", "Z"),
+        "command": [sanitize_summary(item) for item in command],
+        "current": {
+            "cwd": str(current),
+            "branch": current_branch,
+            "head": current_head,
+        },
+        "baseline": {
+            "cwd": str(baseline),
+            "commit": baseline_commit,
+        },
+        "first_run": _run_evidence(first),
+        "baseline_run": _run_evidence(baseline_result),
+        "diagnostic_rerun": _run_evidence(rerun),
+        "classification": classification,
+        "first_failure_preserved": True,
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    filename_timestamp = timestamp.strftime("%Y%m%dT%H%M%S.%fZ")
+    evidence_path = output_root / f"{task_id}-{filename_timestamp}.json"
+    evidence_path.write_text(
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return first.returncode, evidence_path
 
 
 def _doctor_error(message: str) -> int:
@@ -226,6 +357,13 @@ def _parser() -> argparse.ArgumentParser:
     focused_parser = subcommands.add_parser("focused", help="run a focused gate")
     focused_parser.add_argument("--target", choices=VALID_TARGETS, required=True)
     subcommands.add_parser("exit", help="run all exit gates in fixed order")
+    provenance_parser = subcommands.add_parser(
+        "provenance", help="preserve and classify an observed command failure"
+    )
+    provenance_parser.add_argument("--task-id", required=True)
+    provenance_parser.add_argument("--baseline-root", type=Path, required=True)
+    provenance_parser.add_argument("--baseline-commit", required=True)
+    provenance_parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -237,6 +375,24 @@ def main(argv: list[str] | None = None) -> int:
         return focused(args.project_root, args.target)
     if args.command == "exit":
         return exit_gate(args.project_root)
+    if args.command == "provenance":
+        command = list(args.command_argv)
+        if command and command[0] == "--":
+            command = command[1:]
+        try:
+            first_exit, evidence_path = run_provenance(
+                task_id=args.task_id,
+                command=command,
+                current_root=args.project_root,
+                baseline_root=args.baseline_root,
+                baseline_commit=args.baseline_commit,
+                output_root=args.project_root / ".ale-runs",
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ALE provenance: FAIL - {exc}", file=sys.stderr)
+            return 1
+        print(f"ALE provenance evidence: {evidence_path}")
+        return first_exit
     return 1
 
 
