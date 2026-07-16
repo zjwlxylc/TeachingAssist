@@ -56,6 +56,33 @@ MANUAL_ACCEPTANCE_BY_STATUS = {
     "rejected_closed": "rejected",
 }
 OPEN_BOOTSTRAP_STATES = {"in_progress", "awaiting_manual_acceptance"}
+EXPECTED_RUNTIME_IGNORED_PREFIXES = (
+    ".ale-runs/",
+    ".claude/",
+    ".idea/",
+    ".runtime/",
+    ".selftest/",
+    ".venv/",
+    ".vscode/",
+    ".workbuddy/",
+    "build/",
+    "dist/",
+    "frontend/.vite/",
+    "frontend/dist/",
+    "frontend/node_modules/",
+)
+EXPECTED_RUNTIME_IGNORED_SUFFIXES = (
+    ".7z",
+    ".db",
+    ".exe",
+    ".log",
+    ".pyc",
+    ".pyo",
+    ".spec",
+    ".sqlite",
+    ".sqlite3",
+    ".zip",
+)
 
 
 def _git(
@@ -388,6 +415,17 @@ def _normalize_allowed_file(value: str) -> tuple[str | None, str | None]:
     return relative.as_posix(), None
 
 
+def _is_expected_runtime_ignored(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    if normalized in {".DS_Store", "Thumbs.db", "config/local.yaml"}:
+        return True
+    if normalized.startswith(EXPECTED_RUNTIME_IGNORED_PREFIXES):
+        return True
+    if "/__pycache__/" in f"/{normalized}" or normalized.startswith("__pycache__/"):
+        return True
+    return normalized.lower().endswith(EXPECTED_RUNTIME_IGNORED_SUFFIXES)
+
+
 def _changed_paths(root: Path, baseline: str) -> tuple[set[str], list[str]]:
     failures: list[str] = []
     commands = (
@@ -395,6 +433,10 @@ def _changed_paths(root: Path, baseline: str) -> tuple[set[str], list[str]]:
         ("staged", ("diff", "--cached", "--name-only", "--")),
         ("unstaged", ("diff", "--name-only", "--")),
         ("untracked", ("ls-files", "--others", "--exclude-standard", "--")),
+        (
+            "ignored",
+            ("ls-files", "--others", "--ignored", "--exclude-standard", "--"),
+        ),
     )
     paths: set[str] = set()
     for label, args in commands:
@@ -402,7 +444,10 @@ def _changed_paths(root: Path, baseline: str) -> tuple[set[str], list[str]]:
         if completed.returncode != 0:
             failures.append(f"unable to inspect {label} paths: {completed.stderr.strip()}")
             continue
-        paths.update(line.strip() for line in completed.stdout.splitlines() if line.strip())
+        observed = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        if label == "ignored":
+            observed = [item for item in observed if not _is_expected_runtime_ignored(item)]
+        paths.update(observed)
     return paths, failures
 
 

@@ -60,6 +60,12 @@ class AleCliTests(unittest.TestCase):
         self.assertEqual(result, 1)
         runner.assert_not_called()
 
+    def test_capture_converts_missing_executable_to_nonzero_result(self) -> None:
+        module = load_ale_cli()
+        completed = module._capture(["ale-command-that-does-not-exist"], ROOT)
+        self.assertEqual(completed.returncode, 127)
+        self.assertTrue(completed.stderr)
+
     def test_development_requirements_include_smoke_test_dependency(self) -> None:
         requirements = (ROOT / "backend/requirements-dev.txt").read_text(encoding="utf-8")
         self.assertEqual(requirements.splitlines(), ["-r requirements.txt", "httpx==0.28.1"])
@@ -82,6 +88,26 @@ class AleCliTests(unittest.TestCase):
         self.assertNotIn("abcdefghijk", cleaned)
         self.assertNotIn("sk-1234567890abcdef", cleaned)
         self.assertIn("[REDACTED]", cleaned)
+
+    def test_summary_redacts_json_yaml_and_quoted_authorization(self) -> None:
+        module = load_ale_cli()
+        raw = (
+            '{"password": "json-secret", "Authorization": "Bearer json-token"}\n'
+            "api_key: yaml-secret\ntoken='quoted-secret'"
+        )
+        cleaned = module.sanitize_summary(raw)
+        for secret in ("json-secret", "json-token", "yaml-secret", "quoted-secret"):
+            self.assertNotIn(secret, cleaned)
+
+    def test_command_redacts_values_following_sensitive_flags(self) -> None:
+        module = load_ale_cli()
+        cleaned = module.sanitize_command(
+            ["tool", "--token", "flag-secret", "--api-key=inline-secret", "safe"]
+        )
+        self.assertEqual(
+            cleaned,
+            ["tool", "--token", "[REDACTED]", "--api-key=[REDACTED]", "safe"],
+        )
 
     def test_provenance_requires_distinct_frozen_baseline_checkout(self) -> None:
         module = load_ale_cli()
@@ -149,6 +175,60 @@ class AleCliTests(unittest.TestCase):
             self.assertEqual(first_exit, 5)
             self.assertEqual(evidence["first_run"]["exit_code"], 5)
             self.assertEqual(evidence["classification"], "baseline_failure")
+            self.assertTrue(evidence["baseline"]["clean_before"])
+            self.assertTrue(evidence["baseline"]["clean_after"])
+            self.assertTrue(evidence["baseline"]["head_unchanged"])
+
+    def test_provenance_rejects_a_dirty_baseline_checkout(self) -> None:
+        module = load_ale_cli()
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            baseline_root = temporary / "baseline"
+            baseline_root.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "ale@example.invalid"],
+                cwd=baseline_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "ALE Test"],
+                cwd=baseline_root,
+                check=True,
+            )
+            (baseline_root / "baseline.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "baseline.txt"], cwd=baseline_root, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "baseline"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+            )
+            baseline_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=baseline_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            ).stdout.strip()
+            (baseline_root / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "frozen baseline checkout must be clean"):
+                module.run_provenance(
+                    task_id="ALE-DIRTY",
+                    command=[sys.executable, "-c", "raise SystemExit(5)"],
+                    current_root=ROOT,
+                    baseline_root=baseline_root,
+                    baseline_commit=baseline_commit,
+                    output_root=temporary / ".ale-runs",
+                )
 
 
 if __name__ == "__main__":

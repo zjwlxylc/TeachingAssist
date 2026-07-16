@@ -20,7 +20,7 @@ def load_checker():
     return module
 
 
-def initialize_repository(repo: Path) -> str:
+def initialize_repository(repo: Path, ignored_pattern: str | None = None) -> str:
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True)
     subprocess.run(
         ["git", "config", "user.email", "ale@example.invalid"],
@@ -34,8 +34,12 @@ def initialize_repository(repo: Path) -> str:
     )
     (repo / "allowed.txt").write_text("base\n", encoding="utf-8")
     (repo / "outside.txt").write_text("base\n", encoding="utf-8")
+    tracked_files = ["allowed.txt", "outside.txt"]
+    if ignored_pattern is not None:
+        (repo / ".gitignore").write_text(ignored_pattern, encoding="utf-8")
+        tracked_files.append(".gitignore")
     subprocess.run(
-        ["git", "add", "allowed.txt", "outside.txt"],
+        ["git", "add", *tracked_files],
         cwd=repo,
         check=True,
     )
@@ -114,6 +118,17 @@ class AleProjectStateCheckerTests(unittest.TestCase):
             )
             self.assertFalse(parent_report["passed"])
             self.assertFalse(absolute_report["passed"])
+
+    def test_fast_report_rejects_ignored_out_of_scope_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            baseline = initialize_repository(repo, ignored_pattern="hidden.txt\n")
+            (repo / "hidden.txt").write_text("scope escape\n", encoding="utf-8")
+            report = load_checker().build_fast_report(
+                repo, baseline, "codex/fast-test", ["allowed.txt"]
+            )
+            self.assertFalse(report["passed"])
+            self.assertTrue(any("hidden.txt" in item for item in report["failures"]))
 
 
 if __name__ == "__main__":

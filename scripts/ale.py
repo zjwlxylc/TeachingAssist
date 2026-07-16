@@ -11,11 +11,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_TARGETS = ("control-plane", "backend", "frontend")
-SECRET_PATTERNS = (
-    re.compile(r"(?i)Authorization:\s*Bearer\s+\S+"),
-    re.compile(r"(?i)(api[_-]?key|password|secret|token)\s*[:=]\s*\S+"),
-    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
+AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)([\"']?Authorization[\"']?\s*:\s*[\"']?Bearer\s+)([^\"'\s,}]+)"
 )
+SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|password|secret|token)[\"']?\s*[:=]\s*)"
+    r'(?:"[^"]*"|\'[^\']*\'|[^\s,}]+)'
+)
+SECRET_TOKEN_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
+SENSITIVE_COMMAND_FLAGS = {
+    "--api-key",
+    "--api_key",
+    "--password",
+    "--secret",
+    "--token",
+}
 
 
 @dataclass(frozen=True)
@@ -99,15 +109,18 @@ def run_specs(specs: list[CommandSpec]) -> int:
 
 
 def _capture(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv,
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        return subprocess.run(
+            argv,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
 def classify_failure(
@@ -127,10 +140,24 @@ def classify_failure(
 
 
 def sanitize_summary(text: str) -> str:
-    cleaned = text
-    for pattern in SECRET_PATTERNS:
-        cleaned = pattern.sub("[REDACTED]", cleaned)
+    cleaned = AUTHORIZATION_PATTERN.sub(r"\1[REDACTED]", text)
+    cleaned = SENSITIVE_ASSIGNMENT_PATTERN.sub(r"\1[REDACTED]", cleaned)
+    cleaned = SECRET_TOKEN_PATTERN.sub("[REDACTED]", cleaned)
     return cleaned[:4000]
+
+
+def sanitize_command(command: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    redact_next = False
+    for argument in command:
+        if redact_next:
+            cleaned.append("[REDACTED]")
+            redact_next = False
+            continue
+        cleaned.append(sanitize_summary(argument))
+        if argument.lower() in SENSITIVE_COMMAND_FLAGS:
+            redact_next = True
+    return cleaned
 
 
 def _provenance_run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -190,6 +217,11 @@ def run_provenance(
         raise ValueError(
             f"baseline checkout HEAD is {actual_baseline}, expected {baseline_commit}"
         )
+    baseline_status_before = _git_value(
+        baseline, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    if baseline_status_before:
+        raise ValueError("frozen baseline checkout must be clean before reproduction")
 
     current_branch = _git_value(current, "branch", "--show-current")
     current_head = _git_value(current, "rev-parse", "HEAD")
@@ -197,10 +229,21 @@ def run_provenance(
     if first.returncode == 0:
         raise ValueError("provenance command passed; no first failure was observed")
     baseline_result = _provenance_run(command, baseline)
+    baseline_head_after = _git_value(baseline, "rev-parse", "HEAD")
+    baseline_status_after = _git_value(
+        baseline, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    baseline_head_unchanged = baseline_head_after == baseline_commit
+    baseline_clean_after = not baseline_status_after
+    trusted_baseline_exit = (
+        baseline_result.returncode
+        if baseline_head_unchanged and baseline_clean_after
+        else None
+    )
     rerun = _provenance_run(command, current)
     classification = classify_failure(
         first.returncode,
-        baseline_result.returncode,
+        trusted_baseline_exit,
         rerun.returncode,
     )
 
@@ -209,7 +252,7 @@ def run_provenance(
         "schema_version": 1,
         "task_id": task_id,
         "timestamp_utc": timestamp.isoformat().replace("+00:00", "Z"),
-        "command": [sanitize_summary(item) for item in command],
+        "command": sanitize_command(command),
         "current": {
             "cwd": str(current),
             "branch": current_branch,
@@ -218,6 +261,9 @@ def run_provenance(
         "baseline": {
             "cwd": str(baseline),
             "commit": baseline_commit,
+            "clean_before": True,
+            "clean_after": baseline_clean_after,
+            "head_unchanged": baseline_head_unchanged,
         },
         "first_run": _run_evidence(first),
         "baseline_run": _run_evidence(baseline_result),
