@@ -51,6 +51,19 @@ class DefaultTeacherPasswordTests(unittest.TestCase):
         self.assertTrue(auth._verify_password("custom456", password_hash))
         self.assertFalse(auth._verify_password("test123", password_hash))
 
+    def test_reset_replaces_password_and_revokes_existing_tokens(self) -> None:
+        token_info = auth.setup_teacher_password("custom456", "custom456")
+        old_token = str(token_info["token"])
+        resetter = getattr(auth, "reset_teacher_password", None)
+        self.assertIsNotNone(resetter)
+
+        resetter("test123")
+
+        password_hash = self.teacher_password_hash() or ""
+        self.assertTrue(auth._verify_password("test123", password_hash))
+        self.assertFalse(auth._verify_password("custom456", password_hash))
+        self.assertIsNone(auth.validate_token(old_token))
+
 
 if __name__ == "__main__":
     unittest.main()
