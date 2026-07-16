@@ -6,7 +6,7 @@ from unittest import mock
 from app.core.config import AppSettings
 from app.db import session as db_session
 from app.db.migrations import run_migrations
-from app.services import auth
+from app.services import auth, startup
 
 
 class DefaultTeacherPasswordTests(unittest.TestCase):
@@ -63,6 +63,14 @@ class DefaultTeacherPasswordTests(unittest.TestCase):
         self.assertTrue(auth._verify_password("test123", password_hash))
         self.assertFalse(auth._verify_password("custom456", password_hash))
         self.assertIsNone(auth.validate_token(old_token))
+
+    def test_startup_initializes_configured_teacher_password(self) -> None:
+        with mock.patch.object(startup, "get_ai_overview", return_value={"active_provider": None}):
+            startup.run_startup_checks(self.settings)
+
+        password_hash = self.teacher_password_hash()
+        self.assertIsNotNone(password_hash)
+        self.assertTrue(auth._verify_password("test123", password_hash or ""))
 
 
 if __name__ == "__main__":

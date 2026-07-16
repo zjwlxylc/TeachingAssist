@@ -8,6 +8,7 @@ from pathlib import Path
 from app.core.config import AppSettings, PROJECT_ROOT
 from app.db.migrations import integrity_check, run_migrations
 from app.services.ai import check_connectivity, get_ai_overview
+from app.services.auth import initialize_default_teacher_password
 
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ def detect_removable_root(settings: AppSettings) -> Path | None:
 def run_startup_checks(settings: AppSettings) -> dict[str, object]:
     directories = initialize_directories(settings)
     migrations = run_migrations()
+    initialize_default_teacher_password(settings.auth.default_teacher_password)
     integrity = integrity_check()
     removable_root = detect_removable_root(settings)
     ai_status: dict[str, object]
