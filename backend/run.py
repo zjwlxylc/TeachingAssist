@@ -1,7 +1,18 @@
 import os
+import sys
 import socket
+from pathlib import Path
 
 import uvicorn
+
+# PyInstaller 兼容性：确保 app 包可导入
+if getattr(sys, 'frozen', False):
+    # 运行在打包后的可执行文件中
+    bundle_dir = Path(sys._MEIPASS)
+    # 不需要添加到 sys.path，因为 PyInstaller 会处理
+else:
+    # 开发模式
+    bundle_dir = Path(__file__).parent
 
 from app.core.config import get_settings
 

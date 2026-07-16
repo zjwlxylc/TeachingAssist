@@ -121,6 +121,29 @@ export function fetchQuestionDraft(questionId: number, studentId: string, name: 
   });
 }
 
+export interface MyAnswerFeedback {
+  question_id: number;
+  title: string;
+  question_type: string;
+  score: number;
+  answer_text: string | null;
+  status: string | null;
+  is_correct: number | null;
+  answer_score: number | null;
+  submitted_at: string | null;
+  quality_score: number | null;
+  ai_feedback_status: string | null;
+  ai_feedback: Record<string, unknown> | null;
+}
+
+export function fetchMyAnswers(sessionId: number, studentId: string, name: string, token?: string | null) {
+  const params = new URLSearchParams({ student_id: studentId, name });
+  if (token) {
+    params.set("token", token);
+  }
+  return request<{ answers: MyAnswerFeedback[] }>(`/questions/sessions/${sessionId}/my-answers?${params.toString()}`);
+}
+
 export function fetchQuestionBonusSummary(sessionId: number) {
   return request<BonusSummary>(`/questions/sessions/${sessionId}/bonus`);
 }
@@ -138,4 +161,38 @@ export function updateQuestionBonusSettings(payload: Record<string, number>) {
 
 export function downloadQuestionAnswers(sessionId: number) {
   return downloadFile(`/questions/sessions/${sessionId}/answers.csv`, `session_${sessionId}_answers.csv`);
+}
+
+export interface StudentAnswerDetail {
+  answer_id: number;
+  student_id: number;
+  student_number: string;
+  student_name: string;
+  answer_text: string;
+  answer_json: unknown;
+  status: string;
+  is_correct: number | null;
+  answer_score: number | null;
+  quality_score: number | null;
+  bonus_total: number | null;
+  submitted_at: string | null;
+  ai_feedback_status: string | null;
+  ai_feedback: Record<string, unknown> | null;
+}
+
+export interface QuestionAnswersDetail {
+  question: Record<string, unknown>;
+  answers: StudentAnswerDetail[];
+  total: number;
+}
+
+export function fetchQuestionAnswers(questionId: number) {
+  return request<QuestionAnswersDetail>(`/questions/${questionId}/answers`);
+}
+
+export function setAnswerQualityScore(answerId: number, qualityScore: number) {
+  return request<Record<string, unknown>>(`/questions/answers/${answerId}/quality-score`, {
+    method: "PUT",
+    body: JSON.stringify({ quality_score: qualityScore })
+  });
 }

@@ -20,11 +20,15 @@ import {
   Paper,
   Select,
   Stack,
+  Switch,
   Table,
   TableBody,
   TableCell,
+  TableContainer,
   TableHead,
+  TablePagination,
   TableRow,
+  TableSortLabel,
   TextField,
   Typography,
   Tooltip
@@ -105,7 +109,14 @@ import {
   fetchSignInSummary,
   reviewDeviceAlert,
   startClassroomSession,
-  updateSignInStatus
+  updateSignInStatus,
+  EnrollmentApplication,
+  EnrollmentApplicationWithSession,
+  fetchEnrollmentApplications,
+  fetchPendingEnrollments,
+  fetchSessionClasses,
+  approveEnrollmentApplication,
+  rejectEnrollmentApplication
 } from "../api/classroom";
 import {
   BonusSummary,
@@ -120,7 +131,9 @@ import {
   fetchQuestionStats,
   fetchQuestions,
   publishQuestion,
-  updateQuestionBonusSettings
+  updateQuestionBonusSettings,
+  fetchQuestionAnswers,
+  setAnswerQualityScore
 } from "../api/questions";
 import {
   Homework,
@@ -189,7 +202,6 @@ import {
 import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { AIChatPanel } from "../components/AIChatPanel";
-import Switch from "@mui/material/Switch";
 import { useAuthStore } from "../store/authStore";
 import { useStatusStore } from "../store/statusStore";
 
@@ -200,6 +212,17 @@ const QUESTION_TYPE_LABELS: Record<QuestionType, string> = {
   fill_blank: "填空题",
   short_answer: "简答题"
 };
+
+/** 问题 / 作业状态 → 中文标签（原始值为英文枚举，避免直接展示给教师） */
+const STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  published: "已发布",
+  closed: "已关闭",
+  active: "进行中",
+  ended: "已结束"
+};
+const statusLabel = (value: string | undefined): string =>
+  (value && STATUS_LABELS[value]) || value || "";
 
 const DEFAULT_OPTIONS: QuestionOption[] = [
   { option_key: "A", content: "", is_correct: false },
@@ -318,6 +341,25 @@ export function TeacherPage() {
   const [signInLogs, setSignInLogs] = useState<Array<Record<string, unknown>>>([]);
   const [signInReason, setSignInReason] = useState("教师手动调整");
   const [deviceAlerts, setDeviceAlerts] = useState<DeviceSharingAlert[]>([]);
+  const [enrollmentApplications, setEnrollmentApplications] = useState<EnrollmentApplication[]>([]);
+  // 签到记录分页、搜索、排序
+  const [signInPage, setSignInPage] = useState(0);
+  const [signInRowsPerPage, setSignInRowsPerPage] = useState(20);
+  const [signInSearchText, setSignInSearchText] = useState("");
+  const [signInSortBy, setSignInSortBy] = useState<"student_number" | "student_name" | "status" | "sign_time">("student_number");
+  const [signInSortOrder, setSignInSortOrder] = useState<"asc" | "desc">("asc");
+  // 跨课堂待审批注册申请汇总（教师端顶部卡片，进入课堂模块即加载，不依赖点开签到统计）
+  const [globalPendingApps, setGlobalPendingApps] = useState<EnrollmentApplicationWithSession[]>([]);
+  const [globalApprovalAppId, setGlobalApprovalAppId] = useState<number | null>(null);
+  const [globalApprovalClassId, setGlobalApprovalClassId] = useState<number | "">("");
+  const [globalApprovalClasses, setGlobalApprovalClasses] = useState<Array<{id: number; name: string}>>([]);
+  const [globalRejectAppId, setGlobalRejectAppId] = useState<number | null>(null);
+  const [globalRejectReason, setGlobalRejectReason] = useState("");
+  const [sessionClasses, setSessionClasses] = useState<Array<{id: number; name: string}>>([]);
+  const [approvalClassId, setApprovalClassId] = useState<number | "">("");
+  const [approvalApplicationId, setApprovalApplicationId] = useState<number | null>(null);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [rejectionApplicationId, setRejectionApplicationId] = useState<number | null>(null);
   const [announcementSessionId, setAnnouncementSessionId] = useState<number | "">("");
   const [announcementContent, setAnnouncementContent] = useState("");
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -335,6 +377,8 @@ export function TeacherPage() {
   const [messageReplyContent, setMessageReplyContent] = useState("");
   const [messageUnreadTotal, setMessageUnreadTotal] = useState(0);
   const [interactionUnread, setInteractionUnread] = useState(0);
+  // 持有当前已加载签到统计的 session id，供 WS 回调写入 per-session 列表时读取，避免闭包过期
+  const signInSummarySessionRef = useRef<number | "">("");
   const messageSocketRef = useRef<TeachingAssistSocket | null>(null);
   // 持有最新选中的私信会话 student_pk，供 WS 回调读取，避免切换会话时重建 WS 连接与轮询
   const selectedMessageStudentPkRef = useRef<number | "">(selectedMessageStudentPk);
@@ -350,8 +394,19 @@ export function TeacherPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [questionStats, setQuestionStats] = useState<QuestionStats | null>(null);
   const [anonymousStats, setAnonymousStats] = useState<Record<string, unknown> | null>(null);
+  const [studentAnswers, setStudentAnswers] = useState<import("../api/questions").QuestionAnswersDetail | null>(null);
   const [bonusSummary, setBonusSummary] = useState<BonusSummary | null>(null);
   const [bonusSettings, setBonusSettings] = useState<Record<string, number | string>>({});
+
+  /** 加分规则字段 → 中文标签（排除 id / updated_at 等元数据字段） */
+  const BONUS_FIELD_LABELS: Record<string, string> = {
+    participation_score: "参与分",
+    correct_score: "正确分",
+    timeliness_score: "及时分",
+    timeliness_percent: "及时比例(%)",
+    max_quality_score: "质量分上限",
+    session_cap: "单课上限",
+  };
   const [homeworkSessionId, setHomeworkSessionId] = useState<number | "">("");
   const [homeworkTitle, setHomeworkTitle] = useState("");
   const [homeworkDescription, setHomeworkDescription] = useState("");
@@ -488,6 +543,19 @@ export function TeacherPage() {
       })
       .catch((err: Error) => setError(err.message));
   }, [isAuthenticated, showInactiveStudents]);
+
+  // 自动刷新注册申请列表（每30秒）
+  useEffect(() => {
+    if (!signInSummary || signInSummary.session.status !== "active") {
+      return;
+    }
+    const intervalId = setInterval(() => {
+      loadEnrollmentApplications(signInSummary.session.id).catch(() => {
+        // 静默失败，不打断用户操作
+      });
+    }, 30000); // 30秒
+    return () => clearInterval(intervalId);
+  }, [signInSummary]);
 
   async function reloadAcademic() {
     const [courseData, classData, sessionData, studentData] = await Promise.all([
@@ -965,19 +1033,93 @@ export function TeacherPage() {
 
   async function handleLoadSignIns(sessionId: number) {
     try {
-      const [summary, logs, alerts] = await Promise.all([
+      const [summary, logs, alerts, applications, classes] = await Promise.all([
         fetchSignInSummary(sessionId),
         fetchSignInLogs(sessionId),
         fetchDeviceAlerts(sessionId).catch(() => [] as DeviceSharingAlert[]),
+        fetchEnrollmentApplications(sessionId, "pending").catch(() => [] as EnrollmentApplication[]),
+        fetchSessionClasses(sessionId).catch(() => [] as Array<{id: number; name: string}>),
       ]);
       setSignInSummary(summary);
       setSignInLogs(logs);
       setDeviceAlerts(alerts);
-      setMessage(alerts.length > 0 ? `签到统计已刷新，发现 ${alerts.length} 条设备共用警告` : "签到统计已刷新");
+      setEnrollmentApplications(applications);
+      setSessionClasses(classes);
+      signInSummarySessionRef.current = summary.session.id;
+      setGlobalPendingApps((prev) => prev.filter((a) => a.session_id !== summary.session.id));
+      // 重置分页和搜索
+      setSignInPage(0);
+      setSignInSearchText("");
+      const alertMsg = alerts.length > 0 ? `，发现 ${alerts.length} 条设备共用警告` : "";
+      const appMsg = applications.length > 0 ? `，有 ${applications.length} 条待审批注册申请` : "";
+      setMessage(`签到统计已刷新${alertMsg}${appMsg}`);
     } catch (err) {
       setError((err as Error).message);
     }
   }
+
+  // 签到记录过滤、排序和分页
+  const getFilteredAndSortedSignInRecords = () => {
+    if (!signInSummary) return [];
+
+    let filtered = signInSummary.records;
+
+    // 搜索过滤
+    if (signInSearchText.trim()) {
+      const searchLower = signInSearchText.toLowerCase();
+      filtered = filtered.filter(
+        (record) =>
+          record.student_number.toLowerCase().includes(searchLower) ||
+          record.student_name.toLowerCase().includes(searchLower)
+      );
+    }
+
+    // 排序
+    const sorted = [...filtered].sort((a, b) => {
+      let aValue: string | number = "";
+      let bValue: string | number = "";
+
+      switch (signInSortBy) {
+        case "student_number":
+          aValue = a.student_number;
+          bValue = b.student_number;
+          break;
+        case "student_name":
+          aValue = a.student_name;
+          bValue = b.student_name;
+          break;
+        case "status":
+          aValue = a.status || "未签到";
+          bValue = b.status || "未签到";
+          break;
+        case "sign_time":
+          aValue = a.sign_time || "";
+          bValue = b.sign_time || "";
+          break;
+      }
+
+      if (aValue < bValue) return signInSortOrder === "asc" ? -1 : 1;
+      if (aValue > bValue) return signInSortOrder === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    return sorted;
+  };
+
+  const filteredSignInRecords = getFilteredAndSortedSignInRecords();
+  const paginatedSignInRecords = filteredSignInRecords.slice(
+    signInPage * signInRowsPerPage,
+    signInPage * signInRowsPerPage + signInRowsPerPage
+  );
+
+  const handleSignInSort = (column: "student_number" | "student_name" | "status" | "sign_time") => {
+    if (signInSortBy === column) {
+      setSignInSortOrder(signInSortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSignInSortBy(column);
+      setSignInSortOrder("asc");
+    }
+  };
 
   async function handleReviewAlert(alertId: number) {
     try {
@@ -997,6 +1139,100 @@ export function TeacherPage() {
       setSignInSummary(await updateSignInStatus(signInSummary.session.id, studentPk, status, signInReason || undefined));
       setSignInLogs(await fetchSignInLogs(signInSummary.session.id));
       setMessage(status === "absent" ? "签到状态已改为缺勤" : status === "leave" ? "签到状态已改为请假" : "补签/状态修改已保存");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function loadEnrollmentApplications(sessionId: number) {
+    try {
+      const [apps, classes] = await Promise.all([
+        fetchEnrollmentApplications(sessionId, "pending"),
+        fetchSessionClasses(sessionId)
+      ]);
+      setEnrollmentApplications(apps);
+      setSessionClasses(classes);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleApproveApplication(applicationId: number, classId: number) {
+    if (!signInSummary) {
+      return;
+    }
+    try {
+      await approveEnrollmentApplication(signInSummary.session.id, applicationId, classId, true);
+      await loadEnrollmentApplications(signInSummary.session.id);
+      removeAppFromLists(applicationId);
+      setSignInSummary(await fetchSignInSummary(signInSummary.session.id));
+      setMessage("申请已批准，学生已加入名单并完成签到");
+      setApprovalApplicationId(null);
+      setApprovalClassId("");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleRejectApplication(applicationId: number, reason?: string) {
+    if (!signInSummary) {
+      return;
+    }
+    try {
+      await rejectEnrollmentApplication(signInSummary.session.id, applicationId, reason);
+      await loadEnrollmentApplications(signInSummary.session.id);
+      removeAppFromLists(applicationId);
+      setMessage("申请已拒绝");
+      setRejectionApplicationId(null);
+      setRejectionReason("");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  // 从 per-session 面板与跨课堂汇总卡片中同步移除某条申请（批准/拒绝后保持一致）
+  function removeAppFromLists(appId: number) {
+    setEnrollmentApplications((prev) => prev.filter((a) => a.id !== appId));
+    setGlobalPendingApps((prev) => prev.filter((a) => a.id !== appId));
+  }
+
+  // 跨课堂待审批汇总：进入课堂模块即加载，红点与顶部卡片由此驱动
+  async function loadGlobalPending() {
+    try {
+      const apps = await fetchPendingEnrollments();
+      setGlobalPendingApps(apps);
+    } catch {
+      /* 瞬时网络错误忽略 */
+    }
+  }
+
+  async function handleApproveGlobal(app: EnrollmentApplicationWithSession, classId: number) {
+    try {
+      await approveEnrollmentApplication(app.session_id, app.id, classId, true);
+      removeAppFromLists(app.id);
+      if (signInSummarySessionRef.current === app.session_id) {
+        setEnrollmentApplications(await fetchEnrollmentApplications(app.session_id, "pending"));
+        setSignInSummary(await fetchSignInSummary(app.session_id));
+      }
+      setMessage("申请已批准，学生已加入名单并完成签到");
+      setGlobalApprovalAppId(null);
+      setGlobalApprovalClassId("");
+      setGlobalApprovalClasses([]);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleRejectGlobal(app: EnrollmentApplicationWithSession, reason?: string) {
+    try {
+      await rejectEnrollmentApplication(app.session_id, app.id, reason);
+      removeAppFromLists(app.id);
+      if (signInSummarySessionRef.current === app.session_id) {
+        setEnrollmentApplications(await fetchEnrollmentApplications(app.session_id, "pending"));
+      }
+      setMessage("申请已拒绝");
+      setGlobalRejectAppId(null);
+      setGlobalRejectReason("");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1156,6 +1392,47 @@ export function TeacherPage() {
     };
   }, [isAuthenticated, activeTeacherSection]);
 
+  // 课堂模块实时接收学生注册申请：为所有 active 课堂建立 WS，监听 enrollment.application.created。
+  // 学生一提交，教师端红点即时 +1，且若正在查看该课堂签到面板则同步插入列表。
+  useEffect(() => {
+    if (activeTeacherSection !== "classroom") return undefined;
+    const activeSessions = sessions.filter((s) => s.status === "active");
+    if (activeSessions.length === 0) return undefined;
+    const sockets = activeSessions.map((s) => {
+      const sid = Number(s.id);
+      const sock = new TeachingAssistSocket(
+        classroomSocketUrl(sid),
+        (event) => {
+          try {
+            const payload = JSON.parse(event.data) as {
+              type?: string;
+              application?: EnrollmentApplicationWithSession;
+            };
+            if (payload.type === "enrollment.application.created" && payload.application) {
+              const app = payload.application;
+              setGlobalPendingApps((prev) =>
+                prev.some((a) => a.id === app.id) ? prev : [app, ...prev]
+              );
+              if (signInSummarySessionRef.current === sid) {
+                setEnrollmentApplications((prev) =>
+                  prev.some((a) => a.id === app.id) ? prev : [app, ...prev]
+                );
+              }
+            }
+          } catch {
+            /* 忽略异常消息 */
+          }
+        },
+        3000
+      );
+      sock.connect();
+      return sock;
+    });
+    return () => {
+      sockets.forEach((sc) => sc.close());
+    };
+  }, [activeTeacherSection, sessions]);
+
   // 课堂互动 WebSocket：只要已选定互动课堂（无论是否停留在互动模块）就保持监听，
   // 这样老师不在互动模块时也能通过左栏红点感知新留言。
   useEffect(() => {
@@ -1227,6 +1504,8 @@ export function TeacherPage() {
       void handleLoadInteraction(target);
     } else if (activeTeacherSection === "aichat" && aiSessionId === "") {
       setAiSessionId(target);
+    } else if (activeTeacherSection === "classroom") {
+      void loadGlobalPending();
     } else if (interactionSessionId === "" && activeTeacherSection !== "aichat") {
       // 登录即预选默认互动课堂，使红点提醒能从课堂开始时就监听最新开课课堂的留言
       void handleLoadInteraction(target);
@@ -1338,6 +1617,29 @@ export function TeacherPage() {
       setQuestionStats(stats);
       setAnonymousStats(anonymous);
       setMessage("问答统计已刷新");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleLoadStudentAnswers(questionId: number) {
+    try {
+      const data = await fetchQuestionAnswers(questionId);
+      setStudentAnswers(data);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleSetQualityScore(answerId: number, qualityScore: number) {
+    try {
+      await setAnswerQualityScore(answerId, qualityScore);
+      // 刷新当前列表以反映更新
+      if (studentAnswers && studentAnswers.question) {
+        const qId = (studentAnswers.question as Record<string, unknown>).id as number;
+        void handleLoadStudentAnswers(qId);
+      }
+      setMessage("质量分已保存");
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1635,7 +1937,8 @@ export function TeacherPage() {
               {TEACHER_SECTIONS.map((section) => {
                 const unread =
                   section.key === "messages" ? messageUnreadTotal :
-                  section.key === "interaction" ? interactionUnread : 0;
+                  section.key === "interaction" ? interactionUnread :
+                  section.key === "classroom" ? globalPendingApps.length : 0;
                 const labelNode = (
                   <Typography component="span" sx={{ fontWeight: 700, lineHeight: 1.3, fontSize: "0.875rem" }}>
                     {section.label}
@@ -2648,6 +2951,150 @@ export function TeacherPage() {
                   管理课堂开始、结束和学生签到统计。课堂 ID 可告知学生用于签到。
                 </Typography>
               </Box>
+              {globalPendingApps.length > 0 && (
+                <Paper variant="outlined" sx={{ p: 2, borderColor: "error.main", bgcolor: "error.50" }}>
+                  <Stack spacing={1.5}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Chip color="error" size="small" label={`待审批 ${globalPendingApps.length} 条`} />
+                      <Typography fontWeight={700} color="error.dark">
+                        学生注册申请
+                      </Typography>
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary">
+                      学生签到时不在名单中提交申请；教师批准后即加入该课堂、课程与班级，并自动完成签到。
+                    </Typography>
+                    <Stack spacing={1}>
+                      {globalPendingApps.map((app) => (
+                        <Paper key={app.id} variant="outlined" sx={{ p: 1.5, bgcolor: "background.paper" }}>
+                          <Stack spacing={1}>
+                            <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap>
+                              <Box>
+                                <Typography variant="body2" fontWeight={700}>
+                                  {app.student_number} / {app.name}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  课堂 #{app.session_id}
+                                  {app.session_title ? `：${app.session_title}` : ""}
+                                  {app.course_name ? ` / ${app.course_name}` : ""}
+                                  {app.class_name ? ` / 可选班级：${app.class_name}` : ""}
+                                </Typography>
+                              </Box>
+                              <Chip size="small" color="warning" label="待审批" />
+                            </Stack>
+                            <Typography variant="body2" color="text.secondary">
+                              {app.major && `专业：${app.major} `}
+                              {app.college && `院系：${app.college} `}
+                              {app.grade && `年级：${app.grade}`}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              申请时间：{app.created_at}
+                            </Typography>
+                            {globalApprovalAppId === app.id ? (
+                              <Stack spacing={1}>
+                                <FormControl size="small" fullWidth>
+                                  <InputLabel>选择班级</InputLabel>
+                                  <Select
+                                    value={globalApprovalClassId}
+                                    label="选择班级"
+                                    onChange={(event) => setGlobalApprovalClassId(Number(event.target.value))}
+                                  >
+                                    {(globalApprovalClasses.length > 0 ? globalApprovalClasses : sessionClasses).map((cls) => (
+                                      <MenuItem key={cls.id} value={cls.id}>
+                                        {cls.name}
+                                      </MenuItem>
+                                    ))}
+                                  </Select>
+                                </FormControl>
+                                <Stack direction="row" spacing={0.5}>
+                                  <Button
+                                    size="small"
+                                    variant="contained"
+                                    disabled={!globalApprovalClassId}
+                                    onClick={() => globalApprovalClassId && handleApproveGlobal(app, Number(globalApprovalClassId))}
+                                  >
+                                    确认批准
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => {
+                                      setGlobalApprovalAppId(null);
+                                      setGlobalApprovalClassId("");
+                                      setGlobalApprovalClasses([]);
+                                    }}
+                                  >
+                                    取消
+                                  </Button>
+                                </Stack>
+                              </Stack>
+                            ) : globalRejectAppId === app.id ? (
+                              <Stack spacing={1}>
+                                <TextField
+                                  size="small"
+                                  label="拒绝原因（选填）"
+                                  value={globalRejectReason}
+                                  onChange={(event) => setGlobalRejectReason(event.target.value)}
+                                  fullWidth
+                                />
+                                <Stack direction="row" spacing={0.5}>
+                                  <Button
+                                    size="small"
+                                    variant="contained"
+                                    color="error"
+                                    onClick={() => handleRejectGlobal(app, globalRejectReason || undefined)}
+                                  >
+                                    确认拒绝
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => {
+                                      setGlobalRejectAppId(null);
+                                      setGlobalRejectReason("");
+                                    }}
+                                  >
+                                    取消
+                                  </Button>
+                                </Stack>
+                              </Stack>
+                            ) : (
+                              <Stack direction="row" spacing={0.5}>
+                                <Button
+                                  size="small"
+                                  variant="contained"
+                                  color="success"
+                                  onClick={async () => {
+                                    setGlobalApprovalAppId(app.id);
+                                    setGlobalApprovalClassId("");
+                                    try {
+                                      setGlobalApprovalClasses(await fetchSessionClasses(app.session_id));
+                                    } catch {
+                                      setGlobalApprovalClasses([]);
+                                    }
+                                  }}
+                                >
+                                  批准
+                                </Button>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  color="error"
+                                  onClick={() => {
+                                    setGlobalRejectAppId(app.id);
+                                    setGlobalRejectReason("");
+                                  }}
+                                >
+                                  拒绝
+                                </Button>
+                              </Stack>
+                            )}
+                          </Stack>
+                        </Paper>
+                      ))}
+                    </Stack>
+                  </Stack>
+                </Paper>
+              )}
               <Grid container spacing={2}>
                 <Grid item xs={12} md={6}>
                   <Stack spacing={1.5}>
@@ -2723,57 +3170,139 @@ export function TeacherPage() {
                             {signInSummary.stats.unsigned}
                           </Typography>
                         </Box>
+
+                        {/* 搜索和导出 */}
                         <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                          <TextField
+                            size="small"
+                            label="搜索学号或姓名"
+                            value={signInSearchText}
+                            onChange={(event) => {
+                              setSignInSearchText(event.target.value);
+                              setSignInPage(0);
+                            }}
+                            placeholder="输入学号或姓名..."
+                            sx={{ flex: 1 }}
+                          />
                           <TextField
                             size="small"
                             label="调整原因"
                             value={signInReason}
                             onChange={(event) => setSignInReason(event.target.value)}
-                            fullWidth
+                            sx={{ flex: 1 }}
                           />
                           <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleDownloadSignIns}>
                             导出
                           </Button>
                         </Stack>
-                        <Paper variant="outlined" sx={{ maxHeight: 320, overflow: "auto" }}>
-                          <Table size="small" stickyHeader>
-                            <TableHead>
-                              <TableRow>
-                                <TableCell>学号</TableCell>
-                                <TableCell>姓名</TableCell>
-                                <TableCell>状态</TableCell>
-                                <TableCell>时间</TableCell>
-                                <TableCell>调整</TableCell>
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {signInSummary.records.map((record) => (
-                                <TableRow key={record.student_pk}>
-                                  <TableCell>{record.student_number}</TableCell>
-                                  <TableCell>{record.student_name}</TableCell>
-                                  <TableCell>{record.status ? SIGN_IN_STATUS_LABELS[record.status] ?? record.status : "未签到"}</TableCell>
-                                  <TableCell>{record.sign_time ?? "-"}</TableCell>
+
+                        {/* 搜索结果提示 */}
+                        {signInSearchText && (
+                          <Typography variant="body2" color="text.secondary">
+                            找到 {filteredSignInRecords.length} 条记录
+                            {filteredSignInRecords.length !== signInSummary.records.length && (
+                              <> / 共 {signInSummary.records.length} 条</>
+                            )}
+                          </Typography>
+                        )}
+
+                        <Paper variant="outlined">
+                          <TableContainer sx={{ maxHeight: 400 }}>
+                            <Table size="small" stickyHeader>
+                              <TableHead>
+                                <TableRow>
                                   <TableCell>
-                                    <Stack direction="row" spacing={0.5}>
-                                      <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "normal")}>
-                                        补签
-                                      </Button>
-                                      <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "late")}>
-                                        迟到
-                                      </Button>
-                                      <Button size="small" color="warning" onClick={() => handleUpdateSignIn(record.student_pk, "absent")}>
-                                        缺勤
-                                      </Button>
-                                      <Button size="small" color="info" onClick={() => handleUpdateSignIn(record.student_pk, "leave")}>
-                                        请假
-                                      </Button>
-                                    </Stack>
+                                    <TableSortLabel
+                                      active={signInSortBy === "student_number"}
+                                      direction={signInSortBy === "student_number" ? signInSortOrder : "asc"}
+                                      onClick={() => handleSignInSort("student_number")}
+                                    >
+                                      学号
+                                    </TableSortLabel>
                                   </TableCell>
+                                  <TableCell>
+                                    <TableSortLabel
+                                      active={signInSortBy === "student_name"}
+                                      direction={signInSortBy === "student_name" ? signInSortOrder : "asc"}
+                                      onClick={() => handleSignInSort("student_name")}
+                                    >
+                                      姓名
+                                    </TableSortLabel>
+                                  </TableCell>
+                                  <TableCell>
+                                    <TableSortLabel
+                                      active={signInSortBy === "status"}
+                                      direction={signInSortBy === "status" ? signInSortOrder : "asc"}
+                                      onClick={() => handleSignInSort("status")}
+                                    >
+                                      状态
+                                    </TableSortLabel>
+                                  </TableCell>
+                                  <TableCell>
+                                    <TableSortLabel
+                                      active={signInSortBy === "sign_time"}
+                                      direction={signInSortBy === "sign_time" ? signInSortOrder : "asc"}
+                                      onClick={() => handleSignInSort("sign_time")}
+                                    >
+                                      时间
+                                    </TableSortLabel>
+                                  </TableCell>
+                                  <TableCell>调整</TableCell>
                                 </TableRow>
-                              ))}
+                              </TableHead>
+                              <TableBody>
+                                {paginatedSignInRecords.length === 0 ? (
+                                  <TableRow>
+                                    <TableCell colSpan={5} align="center">
+                                      <Typography color="text.secondary" py={2}>
+                                        {signInSearchText ? "未找到匹配的记录" : "暂无签到记录"}
+                                      </Typography>
+                                    </TableCell>
+                                  </TableRow>
+                                ) : (
+                                  paginatedSignInRecords.map((record) => (
+                                    <TableRow key={record.student_pk}>
+                                      <TableCell>{record.student_number}</TableCell>
+                                      <TableCell>{record.student_name}</TableCell>
+                                      <TableCell>{record.status ? SIGN_IN_STATUS_LABELS[record.status] ?? record.status : "未签到"}</TableCell>
+                                      <TableCell>{record.sign_time ?? "-"}</TableCell>
+                                      <TableCell>
+                                        <Stack direction="row" spacing={0.5}>
+                                          <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "normal")}>
+                                            补签
+                                          </Button>
+                                          <Button size="small" onClick={() => handleUpdateSignIn(record.student_pk, "late")}>
+                                            迟到
+                                          </Button>
+                                          <Button size="small" color="warning" onClick={() => handleUpdateSignIn(record.student_pk, "absent")}>
+                                            缺勤
+                                          </Button>
+                                          <Button size="small" color="info" onClick={() => handleUpdateSignIn(record.student_pk, "leave")}>
+                                            请假
+                                          </Button>
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))
+                                )}
                             </TableBody>
                           </Table>
-                        </Paper>
+                        </TableContainer>
+                        <TablePagination
+                          component="div"
+                          count={filteredSignInRecords.length}
+                          page={signInPage}
+                          onPageChange={(_, newPage) => setSignInPage(newPage)}
+                          rowsPerPage={signInRowsPerPage}
+                          onRowsPerPageChange={(event) => {
+                            setSignInRowsPerPage(parseInt(event.target.value, 10));
+                            setSignInPage(0);
+                          }}
+                          rowsPerPageOptions={[10, 20, 50, 100]}
+                          labelRowsPerPage="每页行数："
+                          labelDisplayedRows={({ from, to, count }) => `${from}-${to} / 共 ${count}`}
+                        />
+                      </Paper>
                         <Paper variant="outlined" sx={{ p: 1.5, maxHeight: 160, overflow: "auto" }}>
                           <Typography fontWeight={700} sx={{ mb: 1 }}>
                             修改日志
@@ -2829,6 +3358,129 @@ export function TeacherPage() {
                                   <Typography variant="caption" color="text.secondary">
                                     {alert.created_at} / 设备标识：{(alert.device_hash || "").substring(0, 16)}...
                                   </Typography>
+                                </Box>
+                              ))}
+                            </Stack>
+                          </Paper>
+                        )}
+                        {enrollmentApplications.length > 0 && (
+                          <Paper variant="outlined" sx={{ p: 1.5, borderColor: "info.main", bgcolor: "info.50" }}>
+                            <Stack spacing={1}>
+                              <Stack direction="row" justifyContent="space-between" alignItems="center">
+                                <Typography fontWeight={700} color="info.dark">
+                                  学生注册申请（{enrollmentApplications.length} 条待审批）
+                                </Typography>
+                                <Button
+                                  size="small"
+                                  onClick={() => signInSummary && loadEnrollmentApplications(signInSummary.session.id)}
+                                >
+                                  刷新
+                                </Button>
+                              </Stack>
+                              {enrollmentApplications.map((app) => (
+                                <Box key={app.id} sx={{ borderBottom: "1px solid", borderColor: "divider", pb: 1 }}>
+                                  <Stack spacing={1}>
+                                    <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap>
+                                      <Typography variant="body2" fontWeight={600}>
+                                        {app.student_number} / {app.name}
+                                      </Typography>
+                                      <Chip size="small" color="warning" label="待审批" />
+                                    </Stack>
+                                    <Typography variant="body2" color="text.secondary">
+                                      {app.major && `专业：${app.major} `}
+                                      {app.college && `院系：${app.college} `}
+                                      {app.grade && `年级：${app.grade}`}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                      申请时间：{app.created_at}
+                                    </Typography>
+                                    {approvalApplicationId === app.id ? (
+                                      <Stack spacing={1}>
+                                        <FormControl size="small" fullWidth>
+                                          <InputLabel>选择班级</InputLabel>
+                                          <Select
+                                            value={approvalClassId}
+                                            label="选择班级"
+                                            onChange={(event) => setApprovalClassId(Number(event.target.value))}
+                                          >
+                                            {sessionClasses.map((cls) => (
+                                              <MenuItem key={cls.id} value={cls.id}>
+                                                {cls.name}
+                                              </MenuItem>
+                                            ))}
+                                          </Select>
+                                        </FormControl>
+                                        <Stack direction="row" spacing={0.5}>
+                                          <Button
+                                            size="small"
+                                            variant="contained"
+                                            disabled={!approvalClassId}
+                                            onClick={() => approvalClassId && handleApproveApplication(app.id, Number(approvalClassId))}
+                                          >
+                                            确认批准
+                                          </Button>
+                                          <Button
+                                            size="small"
+                                            variant="outlined"
+                                            onClick={() => {
+                                              setApprovalApplicationId(null);
+                                              setApprovalClassId("");
+                                            }}
+                                          >
+                                            取消
+                                          </Button>
+                                        </Stack>
+                                      </Stack>
+                                    ) : rejectionApplicationId === app.id ? (
+                                      <Stack spacing={1}>
+                                        <TextField
+                                          size="small"
+                                          label="拒绝原因（选填）"
+                                          value={rejectionReason}
+                                          onChange={(event) => setRejectionReason(event.target.value)}
+                                          fullWidth
+                                        />
+                                        <Stack direction="row" spacing={0.5}>
+                                          <Button
+                                            size="small"
+                                            variant="contained"
+                                            color="error"
+                                            onClick={() => handleRejectApplication(app.id, rejectionReason || undefined)}
+                                          >
+                                            确认拒绝
+                                          </Button>
+                                          <Button
+                                            size="small"
+                                            variant="outlined"
+                                            onClick={() => {
+                                              setRejectionApplicationId(null);
+                                              setRejectionReason("");
+                                            }}
+                                          >
+                                            取消
+                                          </Button>
+                                        </Stack>
+                                      </Stack>
+                                    ) : (
+                                      <Stack direction="row" spacing={0.5}>
+                                        <Button
+                                          size="small"
+                                          variant="contained"
+                                          onClick={() => setApprovalApplicationId(app.id)}
+                                        >
+                                          批准
+                                        </Button>
+                                        <Button
+                                          size="small"
+                                          variant="outlined"
+                                          color="error"
+                                          onClick={() => setRejectionApplicationId(app.id)}
+                                        >
+                                          拒绝
+                                        </Button>
+                                      </Stack>
+                                    )}
+                                  </Stack>
                                 </Box>
                               ))}
                             </Stack>
@@ -3112,12 +3764,17 @@ export function TeacherPage() {
                               答案导出
                             </Button>
                           </Stack>
+                          <Typography variant="body2" color="text.secondary">
+                            每条作答按「参与分 + 正确分 + 及时分 + 质量分」合计；及时分取最早提交的前「及时比例」名，质量分不超过「质量分上限」，学生整堂课总分不超过「单课上限」。修改后点「保存加分规则」生效。
+                          </Typography>
                           <Grid container spacing={1}>
-                            {Object.entries(bonusSettings).map(([key, value]) => (
+                            {Object.entries(bonusSettings)
+                              .filter(([key]) => key in BONUS_FIELD_LABELS)
+                              .map(([key, value]) => (
                               <Grid item xs={6} sm={4} key={key}>
                                 <TextField
                                   size="small"
-                                  label={key}
+                                  label={BONUS_FIELD_LABELS[key] || key}
                                   type="number"
                                   value={value}
                                   onChange={(event) =>
@@ -3160,13 +3817,23 @@ export function TeacherPage() {
                               <Box>
                                 <Typography fontWeight={700}>{item.title}</Typography>
                                 <Typography color="text.secondary" variant="body2">
-                                  {QUESTION_TYPE_LABELS[item.question_type]} / {item.status}
+                                  {QUESTION_TYPE_LABELS[item.question_type]} / {statusLabel(item.status)}
                                   {item.deadline ? ` / 截止 ${item.deadline}` : ""}
                                 </Typography>
                               </Box>
-                              <Button size="small" variant="outlined" onClick={() => handleLoadQuestionStats(item.id)}>
-                                统计
-                              </Button>
+                              <Stack direction="row" spacing={0.5}>
+                                <Button size="small" variant="outlined" onClick={() => handleLoadQuestionStats(item.id)}>
+                                  统计
+                                </Button>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  color={studentAnswers && (studentAnswers.question as Record<string, unknown>).id === item.id ? "primary" : undefined}
+                                  onClick={() => handleLoadStudentAnswers(item.id)}
+                                >
+                                  查看作答
+                                </Button>
+                              </Stack>
                             </Stack>
                           </Box>
                         ))}
@@ -3215,6 +3882,104 @@ export function TeacherPage() {
                         <Typography color="text.secondary">点击问题右侧统计查看提交、正确率和答案分布。</Typography>
                       )}
                     </Paper>
+
+                    {studentAnswers && (
+                      <Paper variant="outlined" sx={{ p: 2 }}>
+                        <Stack spacing={1.5}>
+                          <Box>
+                            <Typography fontWeight={700}>
+                              学生作答详情 — {(studentAnswers.question as Record<string, unknown>).title as string}
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              共 {studentAnswers.total} 条作答记录
+                              {(() => {
+                                const qt = (studentAnswers.question as Record<string, unknown>).question_type as string;
+                                return qt === "short_answer" ? " · 简答题可手动评分" : "";
+                              })()}
+                            </Typography>
+                          </Box>
+                          <TableContainer>
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell>学号</TableCell>
+                                  <TableCell>姓名</TableCell>
+                                  <TableCell>答案内容</TableCell>
+                                  <TableCell>状态</TableCell>
+                                  <TableCell>对错</TableCell>
+                                  <TableCell>质量分</TableCell>
+                                  <TableCell>提交时间</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {studentAnswers.answers.map((ans) => {
+                                  const isShortAnswer = (studentAnswers.question as Record<string, unknown>).question_type === "short_answer";
+                                  return (
+                                    <TableRow key={ans.answer_id}>
+                                      <TableCell sx={{ fontSize: "0.8rem" }}>{ans.student_number}</TableCell>
+                                      <TableCell sx={{ fontSize: "0.8rem" }}>{ans.student_name}</TableCell>
+                                      <TableCell
+                                        sx={{
+                                          fontSize: "0.8rem",
+                                          maxWidth: 280,
+                                          whiteSpace: isShortAnswer ? "pre-wrap" : undefined,
+                                          overflow: isShortAnswer ? "auto" : "hidden",
+                                          textOverflow: isShortAnswer ? "clip" : "ellipsis"
+                                        }}
+                                      >
+                                        {ans.answer_text || "(空)"}
+                                      </TableCell>
+                                      <TableCell sx={{ fontSize: "0.8rem" }}>
+                                        {STATUS_LABELS[ans.status] || ans.status}
+                                      </TableCell>
+                                      <TableCell sx={{ fontSize: "0.8rem" }}>
+                                        {ans.is_correct === 1
+                                          ? <span style={{ color: "#d32f2f" }}>✓ 对</span>
+                                          : ans.is_correct === 0
+                                            ? <span style={{ color: "#388e3c" }}>✗ 错</span>
+                                            : "—"}
+                                      </TableCell>
+                                      <TableCell sx={{ minWidth: 90 }}>
+                                        {isShortAnswer ? (
+                                          <TextField
+                                            type="number"
+                                            value={String(ans.quality_score ?? 0)}
+                                            onChange={(e) => {
+                                              const v = Number(e.target.value);
+                                              if (v >= 0 && v <= 3) {
+                                                void handleSetQualityScore(ans.answer_id, Math.round(v));
+                                              }
+                                            }}
+                                            onBlur={(e) => {
+                                              const v = Number(e.target.value);
+                                              if (v >= 0 && v <= 3) {
+                                                void handleSetQualityScore(ans.answer_id, Math.round(v));
+                                              }
+                                            }}
+                                            inputProps={{ min: 0, max: 3, step: 1 }}
+                                            size="small"
+                                            sx={{ width: 64 }}
+                                            helperText="/3 分"
+                                          />
+                                        ) : (
+                                          ans.quality_score != null ? `${ans.quality_score}/3` : "—"
+                                        )}
+                                      </TableCell>
+                                      <TableCell sx={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>
+                                        {ans.submitted_at ? String(ans.submitted_at).slice(11, 19) : ""}
+                                      </TableCell>
+                                    </TableRow>
+                                  );
+                                })}
+                                {studentAnswers.total === 0 && (
+                                  <TableRow><TableCell colSpan={7} align="center"><Typography color="text.secondary">暂无作答记录。</Typography></TableCell></TableRow>
+                                )}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </Stack>
+                      </Paper>
+                    )}
                   </Stack>
                 </Grid>
               </Grid>
@@ -3309,7 +4074,7 @@ export function TeacherPage() {
                               <Box>
                                 <Typography fontWeight={700}>{item.title}</Typography>
                                 <Typography color="text.secondary" variant="body2">
-                                  {item.status} / 截止 {item.deadline}
+                                  {statusLabel(item.status)} / 截止 {item.deadline}
                                   {item.allow_late ? " / 允许迟交" : ""}
                                 </Typography>
                                 <Typography color="text.secondary" variant="body2">
@@ -3538,6 +4303,20 @@ export function TeacherPage() {
                   学生完成正常或迟到签到后可发言；教师可随时暂停学生发言。
                 </Typography>
               </Box>
+
+              {/* 互动状态栏 */}
+              {interactionSessionId && interactionSettings && (
+                <Alert
+                  severity={interactionSettings.student_messages_enabled ? "success" : "warning"}
+                  icon={interactionSettings.student_messages_enabled ? <span>📢</span> : <span>⏸</span>}
+                >
+                  {interactionSettings.student_messages_enabled
+                    ? "学生发言已开启，可以自由互动"
+                    : "学生发言已暂停，仅教师可发言"}
+                  {moderationLogs.length > 0 && ` | 待审核 ${moderationLogs.length} 条`}
+                </Alert>
+              )}
+
               <Grid container spacing={1.5}>
                 <Grid item xs={12} md={4}>
                   <Stack spacing={1.5}>
@@ -3546,6 +4325,9 @@ export function TeacherPage() {
                         <Stack direction="row" spacing={0.75} alignItems="center">
                           <WarningAmberIcon color="warning" fontSize="small" />
                           <Typography fontWeight={700} fontSize="0.9rem">待审核发言</Typography>
+                          {moderationLogs.length > 0 && (
+                            <Chip size="small" label={moderationLogs.length} color="warning" />
+                          )}
                         </Stack>
                         <Button
                           size="small"
@@ -3555,7 +4337,7 @@ export function TeacherPage() {
                           刷新
                         </Button>
                       </Stack>
-                      <Stack spacing={0.75} sx={{ mt: 1 }}>
+                      <Stack spacing={0.75} sx={{ mt: 1, maxHeight: 200, overflow: "auto" }}>
                         {moderationLogs.length === 0 && (
                           <Typography color="text.secondary" variant="body2">暂无被拦截的发言。</Typography>
                         )}
@@ -3598,13 +4380,23 @@ export function TeacherPage() {
                     </FormControl>
                     <FormControlLabel
                       control={
-                        <Checkbox
+                        <Switch
                           checked={Boolean(interactionSettings?.student_messages_enabled ?? true)}
                           disabled={!interactionSessionId}
                           onChange={(event) => handleToggleInteraction(event.target.checked)}
+                          color="success"
                         />
                       }
-                      label="允许学生互动发言"
+                      label={
+                        <Box>
+                          <Typography variant="body2" fontWeight={600}>
+                            {Boolean(interactionSettings?.student_messages_enabled ?? true) ? "✅ 学生发言已开启" : "⏸ 学生发言已暂停"}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {Boolean(interactionSettings?.student_messages_enabled ?? true) ? "点击暂停" : "点击开启"}
+                          </Typography>
+                        </Box>
+                      }
                     />
                     <TextField
                       label="教师互动消息"
@@ -3614,18 +4406,28 @@ export function TeacherPage() {
                       minRows={2}
                       helperText={`${interactionContent.length}/300`}
                       inputProps={{ maxLength: 300 }}
+                      placeholder="向全班发送互动消息..."
                       fullWidth
                     />
-                    <Button variant="contained" onClick={handlePublishTeacherInteraction}>
+                    <Button variant="contained" onClick={handlePublishTeacherInteraction} disabled={!interactionSessionId || !interactionContent.trim()}>
                       发送互动消息
                     </Button>
                   </Stack>
                 </Grid>
                 <Grid item xs={12} md={8} sx={{ display: "flex" }}>
-                  <Paper variant="outlined" sx={{ p: 1.5, flex: 1, display: "flex", flexDirection: "column", minHeight: 360, maxHeight: 600 }}>
+                  <Paper variant="outlined" sx={{ p: 1.5, flex: 1, display: "flex", flexDirection: "column", minHeight: 360, maxHeight: 600, bgcolor: "background.default" }}>
                     {interactionMessages.length === 0 ? (
                       <Box sx={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <Typography color="text.secondary">选择课堂后可查看互动留言。</Typography>
+                        <Stack spacing={1} alignItems="center">
+                          <Typography color="text.secondary">
+                            {interactionSessionId ? "暂无互动留言" : "请先选择互动课堂"}
+                          </Typography>
+                          {interactionSessionId && (
+                            <Typography variant="body2" color="text.secondary">
+                              等待学生发言或发送第一条互动消息
+                            </Typography>
+                          )}
+                        </Stack>
                       </Box>
                     ) : (
                       <Stack spacing={1.5} sx={{ overflow: "auto", flex: 1, pr: 0.5 }}>

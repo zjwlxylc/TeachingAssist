@@ -1,4 +1,5 @@
 type MessageHandler = (event: MessageEvent) => void;
+type StatusHandler = (status: "connected" | "connecting" | "disconnected") => void;
 
 export class TeachingAssistSocket {
   private socket: WebSocket | null = null;
@@ -13,7 +14,8 @@ export class TeachingAssistSocket {
     private readonly onOpen?: () => void,
     private readonly maxReconnectAttempts = 10,
     private readonly maxReconnectDelay = 30000,
-    private readonly onReconnectFailed?: () => void
+    private readonly onReconnectFailed?: () => void,
+    private readonly onStatusChange?: StatusHandler
   ) {}
 
   connect() {
@@ -22,19 +24,29 @@ export class TeachingAssistSocket {
       return;
     }
     this.closedByClient = false;
+    this.notifyStatus("connecting");
     this.socket = new WebSocket(this.url);
     this.socket.onopen = () => {
       this.reconnectAttempts = 0;
+      this.notifyStatus("connected");
       if (this.onOpen) this.onOpen();
     };
     this.socket.onmessage = this.onMessage;
-    this.socket.onclose = () => this.scheduleReconnect();
+    this.socket.onclose = () => {
+      this.notifyStatus("disconnected");
+      this.scheduleReconnect();
+    };
+    this.socket.onerror = () => {
+      this.notifyStatus("disconnected");
+    };
   }
 
   send(payload: unknown) {
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(payload));
+      return true;
     }
+    return false;
   }
 
   close() {
@@ -47,6 +59,16 @@ export class TeachingAssistSocket {
     this.socket = null;
   }
 
+  isConnected(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  private notifyStatus(status: "connected" | "connecting" | "disconnected") {
+    if (this.onStatusChange) {
+      this.onStatusChange(status);
+    }
+  }
+
   private scheduleReconnect() {
     if (this.closedByClient) {
       return;
@@ -57,6 +79,7 @@ export class TeachingAssistSocket {
       return;
     }
     this.reconnectAttempts += 1;
+    this.notifyStatus("connecting");
     // 指数退避并封顶
     const delay = Math.min(this.reconnectDelay * 2 ** (this.reconnectAttempts - 1), this.maxReconnectDelay);
     this.reconnectTimer = window.setTimeout(() => this.connect(), delay);

@@ -131,3 +131,93 @@ export function reviewDeviceAlert(alertId: number, notes?: string) {
     body: JSON.stringify({ notes: notes ?? null }),
   });
 }
+
+export interface EnrollmentApplication {
+  id: number;
+  session_id: number;
+  student_number: string;
+  name: string;
+  major: string | null;
+  college: string | null;
+  grade: string | null;
+  status: "pending" | "approved" | "rejected" | "auto_merged";
+  rejection_reason: string | null;
+  assigned_class_id: number | null;
+  assigned_class_name: string | null;
+  auto_signed_in: number;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+/** 跨课堂待审批注册申请（含所属课堂信息，用于教师端顶部汇总卡片） */
+export interface EnrollmentApplicationWithSession extends EnrollmentApplication {
+  session_title?: string;
+  course_name?: string;
+  class_name?: string;
+}
+
+/** 教师获取全部课堂的待审批注册申请（跨课堂汇总） */
+export function fetchPendingEnrollments() {
+  return request<EnrollmentApplicationWithSession[]>(`/classroom/enrollment/pending`);
+}
+
+export function createEnrollmentApplication(
+  sessionId: number,
+  studentId: string,
+  name: string,
+  major?: string,
+  college?: string,
+  grade?: string
+) {
+  let browserSessionId: string | null = null;
+  try {
+    browserSessionId = getBrowserSessionId();
+  } catch {
+    // 不阻塞流程
+  }
+
+  return request<EnrollmentApplication>(`/classroom/sessions/${sessionId}/enrollment/apply`, {
+    method: "POST",
+    body: JSON.stringify({
+      student_id: studentId,
+      name,
+      major: major ?? null,
+      college: college ?? null,
+      grade: grade ?? null,
+      device_hash: browserSessionId,
+    }),
+  });
+}
+
+export function fetchEnrollmentApplications(sessionId: number, status?: string) {
+  const query = status ? `?status=${status}` : "";
+  return request<EnrollmentApplication[]>(`/classroom/sessions/${sessionId}/enrollment/applications${query}`);
+}
+
+export function fetchSessionClasses(sessionId: number) {
+  return request<Array<{id: number; name: string}>>(`/classroom/sessions/${sessionId}/enrollment/classes`);
+}
+
+export function approveEnrollmentApplication(
+  sessionId: number,
+  applicationId: number,
+  classId: number,
+  autoSignIn: boolean = true
+) {
+  return request<EnrollmentApplication>(`/classroom/sessions/${sessionId}/enrollment/applications/${applicationId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ class_id: classId, auto_sign_in: autoSignIn }),
+  });
+}
+
+export function rejectEnrollmentApplication(
+  sessionId: number,
+  applicationId: number,
+  rejectionReason?: string
+) {
+  return request<EnrollmentApplication>(`/classroom/sessions/${sessionId}/enrollment/applications/${applicationId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ rejection_reason: rejectionReason ?? null }),
+  });
+}

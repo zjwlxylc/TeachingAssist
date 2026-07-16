@@ -7,6 +7,10 @@ import {
   Card,
   CardContent,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   InputLabel,
   MenuItem,
@@ -33,10 +37,19 @@ import {
   classroomSocketUrl,
   fetchAnnouncements
 } from "../api/announcements";
-import { fetchActiveSessions, fetchPublicSession, studentSignIn, StudentSignInResult } from "../api/classroom";
+import {
+  fetchActiveSessions,
+  fetchPublicSession,
+  studentSignIn,
+  StudentSignInResult,
+  createEnrollmentApplication,
+  EnrollmentApplication
+} from "../api/classroom";
 import {
   Question,
   QuestionPublishedMessage,
+  MyAnswerFeedback,
+  fetchMyAnswers,
   fetchQuestionDraft,
   fetchPublicQuestions,
   submitQuestionAnswer
@@ -72,13 +85,16 @@ import { TeachingAssistSocket } from "../api/websocket";
 import { AppSnackbar } from "../components/AppSnackbar";
 import { AIChatPanel } from "../components/AIChatPanel";
 import { useStatusStore } from "../store/statusStore";
+import { translateError } from "../utils/errorMessages";
+import { ConnectionIndicator, ConnectionStatus } from "../components/ConnectionIndicator";
 
 type ClassroomMessage =
   | AnnouncementMessage
   | QuestionPublishedMessage
   | InteractionMessageCreated
   | InteractionSettingsUpdated
-  | InteractionModerated;
+  | InteractionModerated
+  | { type: "question.feedback.ready" };
 
 type CachedRequest =
   | {
@@ -154,6 +170,11 @@ export function StudentPage() {
   const [name, setName] = useState("");
   const [result, setResult] = useState<StudentSignInResult | null>(null);
   const [studentToken, setStudentToken] = useState<string | null>(null);
+  const [showEnrollmentForm, setShowEnrollmentForm] = useState(false);
+  const [enrollmentMajor, setEnrollmentMajor] = useState("");
+  const [enrollmentCollege, setEnrollmentCollege] = useState("");
+  const [enrollmentGrade, setEnrollmentGrade] = useState("");
+  const [enrollmentResult, setEnrollmentResult] = useState<EnrollmentApplication | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [announcementUnread, setAnnouncementUnread] = useState(0);
   const [interactionUnread, setInteractionUnread] = useState(0);
@@ -169,6 +190,12 @@ export function StudentPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<number, boolean>>({});
+  const [showSignInGuide, setShowSignInGuide] = useState(false);
+  const [wsStatus, setWsStatus] = useState<ConnectionStatus>("disconnected");
+  /** 按题目记录草稿已保存状态：key=questionId，value=提示文案（如「已保存至服务端 12:30:05」） */
+  const [savedDrafts, setSavedDrafts] = useState<Record<number, string>>({});
+  /** 学生本人每题作答反馈（含质量分与 AI 评语），key=questionId */
+  const [myAnswers, setMyAnswers] = useState<Record<number, MyAnswerFeedback>>({});
   const [homeworkList, setHomeworkList] = useState<Homework[]>([]);
   const [homeworkText, setHomeworkText] = useState<Record<number, string>>({});
   const [homeworkFiles, setHomeworkFiles] = useState<Record<number, File[]>>({});
@@ -264,11 +291,12 @@ export function StudentPage() {
           setHomeworkList(homeworkItems);
           restoreLocalDrafts(questionItems);
           void restoreServerDrafts(questionItems);
+          void refreshMyAnswers();
           void replayCachedRequests(sessionId);
         }
       } catch (err) {
         if (!disposed) {
-          setError((err as Error).message);
+          setError(translateError(err as Error));
         }
       }
     };
@@ -304,6 +332,9 @@ export function StudentPage() {
           });
           setMessage("收到新的课堂问题");
         }
+        if (payload.type === "question.feedback.ready") {
+          void refreshMyAnswers();
+        }
       },
       3000,
       () => {
@@ -312,7 +343,11 @@ export function StudentPage() {
           loadMessages(lastId);
         }
         void replayCachedRequests(sessionId);
-      }
+      },
+      10,
+      30000,
+      undefined,
+      (status) => setWsStatus(status)
     );
     socketRef.current = socket;
     socket.connect();
@@ -354,7 +389,7 @@ export function StudentPage() {
         }
       } catch (err) {
         if (!disposed) {
-          setError((err as Error).message);
+          setError(translateError(err as Error));
         }
       }
     };
@@ -371,7 +406,12 @@ export function StudentPage() {
           }
         }
       },
-      3000
+      3000,
+      undefined,
+      10,
+      30000,
+      undefined,
+      (status) => setWsStatus(status)
     );
     privateSocketRef.current = socket;
     socket.connect();
@@ -399,7 +439,7 @@ export function StudentPage() {
       setPrivateMessages(items);
       lastPrivateMessageIdRef.current = items.reduce((max, item) => Math.max(max, item.id), 0);
     } catch (err) {
-      setError((err as Error).message);
+      setError(translateError(err as Error));
     }
   }
 
@@ -413,7 +453,7 @@ export function StudentPage() {
         setCurrentSession(sessions[0]);
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError(translateError(err as Error));
     }
   }
 
@@ -424,7 +464,7 @@ export function StudentPage() {
       setSelectedSessionId(session.id);
       setSessionIdInput(String(session.id));
     } catch (err) {
-      setError((err as Error).message);
+      setError(translateError(err as Error));
     }
   }
 
@@ -499,6 +539,26 @@ export function StudentPage() {
     });
   }
 
+  async function refreshMyAnswers() {
+    const sessionId = currentSession?.id || Number(sessionIdInput);
+    if (!sessionId || !studentId || !name) return;
+    try {
+      const data = await fetchMyAnswers(sessionId, studentId, name, studentToken);
+      const map: Record<number, MyAnswerFeedback> = {};
+      const submitted: Record<number, boolean> = {};
+      (data.answers ?? []).forEach((item) => {
+        map[item.question_id] = item;
+        if (item.status === "submitted" || item.status === "timeout") {
+          submitted[item.question_id] = true;
+        }
+      });
+      setMyAnswers(map);
+      setSubmittedQuestions((current) => ({ ...current, ...submitted }));
+    } catch {
+      // 取反馈失败不影响主流程（如 AI 课堂未配置等），静默忽略
+    }
+  }
+
   async function replayCachedRequests(sessionId: number) {
     const items = readCachedRequests();
     const remaining: CachedRequest[] = [];
@@ -539,8 +599,50 @@ export function StudentPage() {
       setResult(signInResult);
       setStudentToken(signInResult.token ?? null);
       setMessage(signInResult.duplicate ? "你已经完成过签到" : "签到成功");
+      setShowEnrollmentForm(false);
+      setEnrollmentResult(null);
+      // 首次签到成功后显示引导（重复签到不显示）
+      if (!signInResult.duplicate) {
+        setShowSignInGuide(true);
+      }
     } catch (err) {
-      setError((err as Error).message);
+      const error = err as Error;
+      if (error.message.includes("未找到该学号") || error.message.includes("不在本课堂名单中")) {
+        setError("您不在课堂名单中，可以提交注册申请");
+        setShowEnrollmentForm(true);
+      } else if (error.message.includes("课堂尚未开始") || error.message.includes("课堂已结束")) {
+        // 课堂状态问题：显示错误但不隐藏注册表单（如果学生不在名单中，应该已经触发上面的分支）
+        setError(error.message);
+      } else {
+        setError(error.message);
+      }
+    }
+  }
+
+  async function handleEnrollmentApply() {
+    const sessionId = currentSession?.id || Number(sessionIdInput);
+    if (!sessionId || !studentId || !name) {
+      setError("请填写课堂 ID、学号和姓名");
+      return;
+    }
+    try {
+      const application = await createEnrollmentApplication(
+        sessionId,
+        studentId,
+        name,
+        enrollmentMajor || undefined,
+        enrollmentCollege || undefined,
+        enrollmentGrade || undefined
+      );
+      setEnrollmentResult(application);
+      if (application.status === "auto_merged") {
+        setMessage("已自动加入课堂名单，请重新签到");
+        setShowEnrollmentForm(false);
+      } else {
+        setMessage("注册申请已提交，请等待教师审批");
+      }
+    } catch (err) {
+      setError(translateError(err as Error));
     }
   }
 
@@ -557,6 +659,15 @@ export function StudentPage() {
     if (sendingInteraction) {
       return;
     }
+    if (!interactionContent.trim()) {
+      setError("互动留言不能为空");
+      return;
+    }
+    // 检查 WebSocket 连接状态
+    if (wsStatus === "disconnected") {
+      setError("网络连接已断开，请等待重新连接后再发送");
+      return;
+    }
     setSendingInteraction(true);
     try {
       await publishStudentInteractionMessage(sessionId, studentId, name, interactionContent);
@@ -569,7 +680,7 @@ export function StudentPage() {
         setSnackError(msg);
         setInteractionContent("");
       } else {
-        setError(msg);
+        setError(translateError(err as Error));
       }
     } finally {
       setSendingInteraction(false);
@@ -587,6 +698,13 @@ export function StudentPage() {
       saveLocalDraft(question.id, value);
       return { ...current, [question.id]: value };
     });
+    // 答案变动后，旧的「已保存草稿」标记不再可信，清除之
+    setSavedDrafts((current) => {
+      if (!(question.id in current)) return current;
+      const next = { ...current };
+      delete next[question.id];
+      return next;
+    });
   }
 
   async function handleSaveDraft(question: Question) {
@@ -602,9 +720,13 @@ export function StudentPage() {
         action: "save_draft"
       });
       saveLocalDraft(question.id, answers[question.id] ?? "");
-      setMessage("答题草稿已保存");
+      const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      setSavedDrafts((current) => ({ ...current, [question.id]: `已保存至服务端 ${stamp}` }));
+      setMessage("草稿已保存至服务端");
     } catch (err) {
       saveLocalDraft(question.id, answers[question.id] ?? "");
+      const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      setSavedDrafts((current) => ({ ...current, [question.id]: `已存本机 ${stamp}（未同步服务端）` }));
       setMessage("网络暂不可用，草稿已保存在本机");
     }
   }
@@ -615,13 +737,40 @@ export function StudentPage() {
       return;
     }
     try {
-      await submitQuestionAnswer(question.id, {
+      const submitResult = await submitQuestionAnswer(question.id, {
         student_id: studentId,
         name,
         answer: answers[question.id] ?? "",
         action: "submit_answer"
       });
       setSubmittedQuestions((current) => ({ ...current, [question.id]: true }));
+      setSavedDrafts((current) => {
+        if (!(question.id in current)) return current;
+        const next = { ...current };
+        delete next[question.id];
+        return next;
+      });
+      // 提交返回里可能已带 AI 反馈（简答题异步批阅时未必即时返回，稍后由 WS 刷新）
+      if (submitResult) {
+        const result = submitResult as Record<string, unknown>;
+        setMyAnswers((current) => ({
+          ...current,
+          [question.id]: {
+            question_id: question.id,
+            title: question.title,
+            question_type: question.question_type,
+            score: question.score,
+            answer_text: typeof answers[question.id] === "string" ? (answers[question.id] as string) : null,
+            status: "submitted",
+            is_correct: (result["is_correct"] as number | null) ?? null,
+            answer_score: (result["score"] as number | null) ?? null,
+            submitted_at: null,
+            quality_score: (result["quality_score"] as number | null) ?? null,
+            ai_feedback_status: (result["ai_feedback_status"] as string | null) ?? null,
+            ai_feedback: (result["ai_feedback"] as Record<string, unknown> | null) ?? null
+          }
+        }));
+      }
       setMessage("答案已提交");
     } catch (err) {
       cacheRequest({
@@ -686,7 +835,7 @@ export function StudentPage() {
       setHomeworkFeedback((current) => ({ ...current, [homework.id]: feedback }));
       setMessage(feedback.published ? "作业反馈已获取" : "教师尚未发布该作业成绩");
     } catch (err) {
-      setError((err as Error).message);
+      setError(translateError(err as Error));
     }
   }
 
@@ -701,7 +850,7 @@ export function StudentPage() {
       setEvaluationFeedback(feedback);
       setMessage(feedback.evaluation ? "学习反馈已获取" : "教师尚未生成课堂评估");
     } catch (err) {
-      setError((err as Error).message);
+      setError(translateError(err as Error));
     }
   }
 
@@ -712,17 +861,18 @@ export function StudentPage() {
     }));
   }
 
-  function renderAnswerInput(question: Question) {
+  function renderAnswerInput(question: Question, disabled = false) {
     const answer = answers[question.id];
     if (question.question_type === "single_choice" || question.question_type === "true_false") {
       return (
-        <FormControl fullWidth>
+        <FormControl fullWidth disabled={disabled}>
           <InputLabel id={`question-answer-${question.id}`}>选择答案</InputLabel>
           <Select
             labelId={`question-answer-${question.id}`}
             label="选择答案"
             value={typeof answer === "string" ? answer : ""}
             onChange={(event) => setQuestionAnswer(question, event.target.value)}
+            disabled={disabled}
           >
             {question.options.map((option) => (
               <MenuItem key={option.option_key} value={option.option_key}>
@@ -744,6 +894,7 @@ export function StudentPage() {
                 <Checkbox
                   checked={selected.includes(option.option_key)}
                   onChange={(event) => setQuestionAnswer(question, option.option_key, event.target.checked)}
+                  disabled={disabled}
                 />
               }
               label={`${option.option_key}. ${option.content}`}
@@ -760,8 +911,65 @@ export function StudentPage() {
         multiline={question.question_type === "short_answer"}
         minRows={question.question_type === "short_answer" ? 3 : 1}
         fullWidth
+        disabled={disabled}
       />
     );
+  }
+
+  function renderAnswerFeedback(question: Question) {
+    const fb = myAnswers[question.id];
+    if (!fb || !fb.status || fb.status === "draft") return null;
+    // 客观题：提交后即知对错
+    if (question.question_type !== "short_answer") {
+      if (fb.is_correct === 1) {
+        return (
+          <Alert severity="success" sx={{ mt: 1 }}>
+            答对 ✓
+          </Alert>
+        );
+      }
+      if (fb.is_correct === 0) {
+        return (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            答错
+          </Alert>
+        );
+      }
+      return null;
+    }
+    // 简答题：质量分 + AI 评语
+    if (fb.ai_feedback_status === "pending") {
+      return (
+        <Alert severity="info" sx={{ mt: 1 }}>
+          AI 评分中…
+        </Alert>
+      );
+    }
+    if (fb.ai_feedback_status === "pending_manual") {
+      return (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          AI 暂不可用，已转教师手动批阅
+        </Alert>
+      );
+    }
+    if (fb.ai_feedback_status === "completed") {
+      const feedback = fb.ai_feedback ?? {};
+      const join = (value: unknown) =>
+        Array.isArray(value) && value.length > 0 ? value.map((item) => String(item)).join("；") : "";
+      return (
+        <Alert severity="info" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
+          <Box>
+            质量分：
+            <strong>{fb.quality_score ?? 0} / 3 分</strong>
+          </Box>
+          {feedback.comment ? <Box sx={{ mt: 0.5 }}>评语：{String(feedback.comment)}</Box> : null}
+          {join(feedback.strengths) ? <Box sx={{ mt: 0.5 }}>优点：{join(feedback.strengths)}</Box> : null}
+          {join(feedback.problems) ? <Box sx={{ mt: 0.5 }}>不足：{join(feedback.problems)}</Box> : null}
+          {join(feedback.suggestions) ? <Box sx={{ mt: 0.5 }}>建议：{join(feedback.suggestions)}</Box> : null}
+        </Alert>
+      );
+    }
+    return null;
   }
 
   // 将学生身份信息同步到全局状态，供 AppLayout 标题栏展示
@@ -897,6 +1105,50 @@ export function StudentPage() {
                     提交签到
                   </Button>
 
+                  {showEnrollmentForm && (
+                    <Stack spacing={2} sx={{ p: 2, bgcolor: "action.hover", borderRadius: 1 }}>
+                      <Typography variant="h6">注册申请</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        您不在课堂名单中，请填写以下信息提交注册申请：
+                      </Typography>
+                      <TextField
+                        label="专业（选填）"
+                        value={enrollmentMajor}
+                        onChange={(event) => setEnrollmentMajor(event.target.value)}
+                        fullWidth
+                      />
+                      <TextField
+                        label="院系（选填）"
+                        value={enrollmentCollege}
+                        onChange={(event) => setEnrollmentCollege(event.target.value)}
+                        fullWidth
+                      />
+                      <TextField
+                        label="年级（选填）"
+                        value={enrollmentGrade}
+                        onChange={(event) => setEnrollmentGrade(event.target.value)}
+                        placeholder="如：2022"
+                        fullWidth
+                      />
+                      <Stack direction="row" spacing={1}>
+                        <Button variant="contained" onClick={handleEnrollmentApply}>
+                          提交注册申请
+                        </Button>
+                        <Button variant="outlined" onClick={() => setShowEnrollmentForm(false)}>
+                          取消
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  )}
+
+                  {enrollmentResult && (
+                    <Alert severity={enrollmentResult.status === "auto_merged" ? "success" : "info"}>
+                      {enrollmentResult.status === "auto_merged"
+                        ? "已自动加入课堂名单，请重新点击「提交签到」"
+                        : `注册申请已提交（申请时间：${enrollmentResult.created_at}），请等待教师审批`}
+                    </Alert>
+                  )}
+
                   {result && (
                     <Stack spacing={1}>
                       <Alert severity={result.status === "late" ? "warning" : "success"}>
@@ -958,7 +1210,7 @@ export function StudentPage() {
                             </Typography>
                           )}
                         </Box>
-                        {renderAnswerInput(question)}
+                        {renderAnswerInput(question, Boolean(submittedQuestions[question.id]))}
                         <Button
                           variant="contained"
                           startIcon={<SendIcon />}
@@ -971,6 +1223,12 @@ export function StudentPage() {
                           保存草稿
                         </Button>
                       </Stack>
+                      {savedDrafts[question.id] && (
+                        <Typography variant="body2" sx={{ mt: 0.5, color: savedDrafts[question.id].includes("服务端") ? "success.main" : "warning.main" }}>
+                          ✓ {savedDrafts[question.id]}
+                        </Typography>
+                      )}
+                      {renderAnswerFeedback(question)}
                     </Paper>
                   ))}
                   {questions.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的问题。</Typography>}
@@ -989,23 +1247,55 @@ export function StudentPage() {
                       完成签到后可参与课堂留言，全班可见。
                     </Typography>
                   </Box>
-                  {interactionMessages.map((item) => (
-                    <ChatBubble
-                      key={item.id}
-                      role={item.sender_role === "teacher" ? "teacher" : "student"}
-                      name={item.sender_name}
-                      time={item.created_at}
-                      content={item.content}
-                      selfName={item.sender_name}
-                    />
-                  ))}
-                  {interactionMessages.length === 0 && (
-                    <Typography color="text.secondary">暂无课堂互动留言。</Typography>
+
+                  {/* 互动状态栏 */}
+                  {result && (
+                    <Alert
+                      severity={interactionSettings?.student_messages_enabled ?? true ? "success" : "warning"}
+                      icon={interactionSettings?.student_messages_enabled ?? true ? <span>📢</span> : <span>⏸</span>}
+                    >
+                      {interactionSettings?.student_messages_enabled ?? true
+                        ? "课堂互动已开启，可以自由发言"
+                        : "教师已暂停学生发言，你仍可查看已有留言"}
+                    </Alert>
                   )}
+
+                  {/* 消息列表容器 - 固定高度，可滚动 */}
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      minHeight: 400,
+                      maxHeight: 500,
+                      overflow: "auto",
+                      bgcolor: "background.default"
+                    }}
+                  >
+                    <Stack spacing={1.5}>
+                      {interactionMessages.length === 0 && (
+                        <Box sx={{ textAlign: "center", py: 8 }}>
+                          <Typography color="text.secondary">暂无课堂互动留言</Typography>
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                            {result ? "成为第一个发言的同学吧！" : "完成签到后可以参与互动"}
+                          </Typography>
+                        </Box>
+                      )}
+                      {interactionMessages.map((item) => (
+                        <ChatBubble
+                          key={item.id}
+                          role={item.sender_role === "teacher" ? "teacher" : "student"}
+                          name={item.sender_name}
+                          time={item.created_at}
+                          content={item.content}
+                          selfName={name || "我"}
+                        />
+                      ))}
+                    </Stack>
+                  </Paper>
+
                   {!result && <Alert severity="info">完成签到后可参与课堂互动。</Alert>}
-                  {result && !Boolean(interactionSettings?.student_messages_enabled ?? true) && (
-                    <Alert severity="warning">教师已暂停课堂互动发言，你仍可查看已有留言。</Alert>
-                  )}
+
+                  {/* 发送区域 */}
                   <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                     <TextField
                       label="互动留言"
@@ -1015,6 +1305,13 @@ export function StudentPage() {
                       helperText={`${interactionContent.length}/300`}
                       inputProps={{ maxLength: 300 }}
                       fullWidth
+                      placeholder={
+                        !result
+                          ? "请先签到"
+                          : !Boolean(interactionSettings?.student_messages_enabled ?? true)
+                          ? "教师已暂停发言"
+                          : "输入你的留言..."
+                      }
                     />
                     <Button
                       variant="contained"
@@ -1235,6 +1532,103 @@ export function StudentPage() {
 
         <AppSnackbar open={Boolean(message)} message={message} severity="success" onClose={() => setMessage("")} />
         <AppSnackbar open={Boolean(snackError)} message={snackError} severity="error" onClose={() => setSnackError("")} />
+
+        {/* 签到成功引导对话框 */}
+        <Dialog open={showSignInGuide} onClose={() => setShowSignInGuide(false)} maxWidth="sm" fullWidth>
+          <DialogTitle sx={{ bgcolor: "success.main", color: "white", display: "flex", alignItems: "center", gap: 1 }}>
+            <span style={{ fontSize: "1.5rem" }}>✅</span>
+            签到成功！
+          </DialogTitle>
+          <DialogContent sx={{ mt: 2 }}>
+            <Typography variant="body1" sx={{ mb: 2 }}>
+              欢迎来到课堂！接下来你可以：
+            </Typography>
+            <Stack spacing={1.5}>
+              <Button
+                variant="outlined"
+                fullWidth
+                onClick={() => {
+                  setShowSignInGuide(false);
+                  setActiveStudentSection("announcements");
+                }}
+                sx={{ justifyContent: "flex-start", py: 1.5, textAlign: "left" }}
+              >
+                <Box>
+                  <Typography fontWeight={700}>📢 查看课堂公告</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    教师发布的重要通知和课堂安排
+                  </Typography>
+                </Box>
+              </Button>
+              <Button
+                variant="outlined"
+                fullWidth
+                onClick={() => {
+                  setShowSignInGuide(false);
+                  setActiveStudentSection("questions");
+                }}
+                sx={{ justifyContent: "flex-start", py: 1.5, textAlign: "left" }}
+              >
+                <Box>
+                  <Typography fontWeight={700}>❓ 回答课堂问题</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    完成教师发布的题目并查看判分
+                  </Typography>
+                </Box>
+              </Button>
+              <Button
+                variant="outlined"
+                fullWidth
+                onClick={() => {
+                  setShowSignInGuide(false);
+                  setActiveStudentSection("interaction");
+                }}
+                sx={{ justifyContent: "flex-start", py: 1.5, textAlign: "left" }}
+              >
+                <Box>
+                  <Typography fontWeight={700}>💬 参与课堂互动</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    与老师和同学自由讨论交流
+                  </Typography>
+                </Box>
+              </Button>
+              <Button
+                variant="outlined"
+                fullWidth
+                onClick={() => {
+                  setShowSignInGuide(false);
+                  setActiveStudentSection("homework");
+                }}
+                sx={{ justifyContent: "flex-start", py: 1.5, textAlign: "left" }}
+              >
+                <Box>
+                  <Typography fontWeight={700}>📚 查看课堂作业</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    完成并提交作业任务
+                  </Typography>
+                </Box>
+              </Button>
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button onClick={() => setShowSignInGuide(false)} variant="text">
+              稍后再说
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        {/* WebSocket 连接状态指示器 */}
+        <ConnectionIndicator
+          status={wsStatus}
+          onRetry={() => {
+            if (socketRef.current) {
+              socketRef.current.connect();
+            }
+            if (privateSocketRef.current) {
+              privateSocketRef.current.connect();
+            }
+          }}
+        />
       </Stack>
     </Box>
   );

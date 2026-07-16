@@ -35,7 +35,7 @@ if (-not $SkipPyInstaller) {
     --paths backend `
     --add-data "config;config" `
     --add-data "frontend\dist;frontend\dist" `
-    --add-data "backend\app\db\migrations;app\db\migrations" `
+    --add-data "backend\app;app" `
     "backend\run.py"
   Pop-Location
 

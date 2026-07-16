@@ -1,0 +1,19 @@
+﻿environment: production
+api_prefix: /api/v1
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  fallback_ports:
+    - 8081
+    - 8888
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+
+storage:
+  local_root: C:/TeachingAssist
+
+logging:
+  level: INFO
+  file_name: teaching_assist.log

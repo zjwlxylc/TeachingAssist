@@ -24,6 +24,8 @@ Thumbs.db
 
 # Project memory / local agent data (not business code)
 .workbuddy/
+.claude/
+.selftest/
 
 # Local packaged artifacts
 build/
