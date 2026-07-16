@@ -10,6 +10,7 @@ frontend/.vite/
 
 # Runtime and local data
 .runtime/
+.ale-runs/
 *.log
 *.db
 *.sqlite
