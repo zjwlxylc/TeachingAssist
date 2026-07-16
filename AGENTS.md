@@ -2,6 +2,14 @@
 
 本文件用于帮助 Codex 或其他自动化开发代理在新窗口、重新运行或后续阶段开发时快速接手本项目。
 
+## ALE v1.5.0 入口
+
+非平凡任务先按顺序读取 `PROJECT_STATE.yaml`、`CURRENT_ROUTE.md` 和
+`CODEX_WORKFLOW.md`。执行 ALE Outcome 时再读取唯一协议正文
+`docs/agentic_loop_engineering.md`，并运行 `python scripts/ale.py doctor`。
+若控制面工具尚未建立，则按当前实施计划继续真实 RED/GREEN。仓库状态与会话描述冲突时，
+以 Git 和权威文件为准；未经明确授权不得 push、merge 主线或进入下一产品 Outcome。
+
 ## 项目概况
 
 项目名称：大学教学过程辅助软件
