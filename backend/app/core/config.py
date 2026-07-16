@@ -39,6 +39,10 @@ class LoggingSettings(BaseModel):
     file_name: str = "teaching_assist.log"
 
 
+class AuthenticationSettings(BaseModel):
+    default_teacher_password: str = Field(default="test123", min_length=6)
+
+
 class AppSettings(BaseModel):
     app_name: str = "大学教学过程辅助软件"
     environment: str = "development"
@@ -46,6 +50,7 @@ class AppSettings(BaseModel):
     server: ServerSettings = Field(default_factory=ServerSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
 
     def normalized(self) -> "AppSettings":
         storage = self.storage

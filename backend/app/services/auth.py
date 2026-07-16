@@ -95,6 +95,24 @@ def setup_teacher_password(password: str, confirm_password: str) -> dict[str, ob
     return _issue_token(1)
 
 
+def initialize_default_teacher_password(password: str) -> bool:
+    if len(password) < 6:
+        raise AppError("密码长度不能少于 6 位", code="PASSWORD_TOO_SHORT")
+
+    password_hash = _hash_password(password)
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE teachers
+            SET password_hash = ?, password_set_at = datetime('now'), failed_login_count = 0,
+                locked_until = NULL, updated_at = datetime('now')
+            WHERE id = 1 AND password_hash IS NULL
+            """,
+            (password_hash,),
+        )
+    return cursor.rowcount == 1
+
+
 def login_teacher(password: str) -> dict[str, object]:
     teacher = _get_teacher()
     if not teacher.get("password_hash"):

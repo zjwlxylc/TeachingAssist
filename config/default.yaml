@@ -2,6 +2,9 @@ app_name: 大学教学过程辅助软件
 environment: development
 api_prefix: /api/v1
 
+auth:
+  default_teacher_password: test123
+
 server:
   host: 0.0.0.0
   port: 8080
