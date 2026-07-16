@@ -81,8 +81,41 @@ class AleProjectStateCheckerTests(unittest.TestCase):
         module = load_checker()
         state = json.loads((ROOT / "PROJECT_STATE.yaml").read_text(encoding="utf-8"))
         state["control_plane"]["status"] = "accepted_closed"
+        state["control_plane"]["bootstrap_in_place_allowed"] = True
         failures = module.check_state_schema(state)
         self.assertTrue(any("bootstrap_in_place_allowed" in item for item in failures))
+
+    def test_main_permissions_require_accepted_closeout(self) -> None:
+        module = load_checker()
+        state = json.loads((ROOT / "PROJECT_STATE.yaml").read_text(encoding="utf-8"))
+        state["control_plane"]["status"] = "in_progress"
+        state["control_plane"]["manual_acceptance"] = "not_performed"
+        failures = module.check_state_schema(state)
+        self.assertTrue(any("merge_main_allowed" in item for item in failures))
+        self.assertTrue(any("push_origin_main_allowed" in item for item in failures))
+
+    def test_accepted_closeout_allows_main_permissions(self) -> None:
+        module = load_checker()
+        state = json.loads((ROOT / "PROJECT_STATE.yaml").read_text(encoding="utf-8"))
+        state["git"]["authorized_work_branch"] = "main"
+        state["git"]["merge_main_allowed"] = True
+        state["git"]["push_origin_main_allowed"] = True
+        state["control_plane"]["status"] = "accepted_closed"
+        state["control_plane"]["manual_acceptance"] = "accepted"
+        state["control_plane"]["bootstrap_in_place_allowed"] = False
+        failures = module.check_state_schema(state)
+        self.assertFalse(
+            any("must remain false before acceptance" in item for item in failures),
+            failures,
+        )
+
+    def test_primary_main_checkout_requires_explicit_integration_permissions(self) -> None:
+        module = load_checker()
+        state = json.loads((ROOT / "PROJECT_STATE.yaml").read_text(encoding="utf-8"))
+        state["git"]["merge_main_allowed"] = False
+        state["git"]["push_origin_main_allowed"] = False
+        failures = module.check_worktree_consistency(state, ROOT)
+        self.assertTrue(any("linked worktree" in item for item in failures), failures)
 
     def test_fast_report_rejects_out_of_scope_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -12,23 +12,37 @@
   "git": {
     "baseline_branch": "main",
     "baseline_commit": "4ed88a90a07ff44383be17ade63eb4e677e053df",
-    "authorized_work_branch": "codex/ale-v1-5-adaptation",
+    "authorized_work_branch": "main",
     "push_work_branch_allowed": false,
-    "merge_main_allowed": false,
-    "push_origin_main_allowed": false
+    "merge_main_allowed": true,
+    "push_origin_main_allowed": true
   },
   "product_route": {
     "completed_stage": 10,
     "current_gate": "real_classroom_pilot_and_feedback",
     "next_product_work_authorized": false
   },
+  "boundary_scope": "ale_outcome_with_authorized_parallel_integration",
+  "parallel_work": {
+    "observed_in_sibling_checkout": true,
+    "present_in_authorized_branch": true,
+    "included_in_ale_acceptance": false,
+    "main_integration_authorized": true,
+    "source_commits": [
+      "c062b3a",
+      "658b5c1",
+      "b4c1958",
+      "891e225",
+      "8a6cd2c"
+    ]
+  },
   "control_plane": {
     "outcome_batch": "ALE-TA-1",
     "name": "ALE v1.5.0 TeachingAssist Adaptation",
-    "status": "in_progress",
-    "manual_acceptance": "not_performed",
-    "bootstrap_in_place_allowed": true,
-    "follow_up_gate": "human_acceptance_required"
+    "status": "accepted_closed",
+    "manual_acceptance": "accepted",
+    "bootstrap_in_place_allowed": false,
+    "follow_up_gate": "real_classroom_pilot_and_feedback"
   },
   "boundaries": {
     "runtime_changed": false,
@@ -40,10 +54,11 @@
     "new_product_feature_allowed": false
   },
   "verification": {
-    "technical_verification": "not_run",
-    "focused_control_plane": "not_run",
-    "backend_verification": "not_run",
-    "frontend_verification": "not_run",
+    "technical_verification": "passed_on_main",
+    "focused_control_plane": "passed_31_of_31",
+    "backend_verification": "passed_24_of_24",
+    "default_password_regression": "passed_6_of_6",
+    "frontend_verification": "passed_with_existing_chunk_size_warning",
     "automated_tests_equal_human_acceptance": false
   }
 }

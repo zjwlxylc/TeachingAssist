@@ -34,7 +34,8 @@ def setup_teacher(client: TestClient) -> str:
     # 若已设密码则直接登录，否则先 setup
     st = client.get("/api/v1/auth/status").json()
     if st.get("data", {}).get("password_set"):
-        r = client.post("/api/v1/auth/login", json={"password": "Test@1234"})
+        password = get_settings().auth.default_teacher_password
+        r = client.post("/api/v1/auth/login", json={"password": password})
         return r.json()["data"]["token"]
     r = client.post("/api/v1/auth/setup", json={"password": "Test@1234", "confirm_password": "Test@1234"})
     return r.json()["data"]["token"]

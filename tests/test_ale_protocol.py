@@ -44,10 +44,10 @@ class AleProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(
             state["git"]["authorized_work_branch"],
-            "codex/ale-v1-5-adaptation",
+            "main",
         )
-        self.assertFalse(state["git"]["merge_main_allowed"])
-        self.assertFalse(state["git"]["push_origin_main_allowed"])
+        self.assertTrue(state["git"]["merge_main_allowed"])
+        self.assertTrue(state["git"]["push_origin_main_allowed"])
 
     def test_route_is_compact_and_points_to_machine_authority(self) -> None:
         text = (ROOT / "CURRENT_ROUTE.md").read_text(encoding="utf-8")
@@ -75,6 +75,35 @@ class AleProtocolContractTests(unittest.TestCase):
         self.assertIn("PROJECT_STATE.yaml", text)
         self.assertIn("CURRENT_ROUTE.md", text)
         self.assertLess(text.count("Micro Fix Loop"), 2)
+
+    def test_accepted_outcome_records_user_authorized_main_integration(self) -> None:
+        state = json.loads((ROOT / "PROJECT_STATE.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(state["control_plane"]["status"], "accepted_closed")
+        self.assertEqual(state["control_plane"]["manual_acceptance"], "accepted")
+        self.assertFalse(state["control_plane"]["bootstrap_in_place_allowed"])
+        self.assertFalse(state["git"]["push_work_branch_allowed"])
+        self.assertTrue(state["git"]["merge_main_allowed"])
+        self.assertTrue(state["git"]["push_origin_main_allowed"])
+        self.assertFalse(
+            state["verification"]["automated_tests_equal_human_acceptance"]
+        )
+
+        parallel = state["parallel_work"]
+        self.assertTrue(parallel["present_in_authorized_branch"])
+        self.assertFalse(parallel["included_in_ale_acceptance"])
+        self.assertTrue(parallel["main_integration_authorized"])
+
+        package = (ROOT / "docs/ale_ta_1_manual_acceptance.md").read_text(
+            encoding="utf-8"
+        )
+        for term in (
+            "status: accepted_closed",
+            "manual_acceptance: accepted",
+            "b4c1958 / 891e225 / 8a6cd2c",
+            "main integration authorized",
+            "Automated verification does not equal human acceptance.",
+        ):
+            self.assertIn(term, package)
 
 
 if __name__ == "__main__":

@@ -166,11 +166,6 @@ def check_state_schema(state: dict[str, object]) -> list[str]:
     ):
         if permission in git_state and not isinstance(git_state[permission], bool):
             failures.append(f"git.{permission} must be boolean")
-    if git_state.get("merge_main_allowed") is not False:
-        failures.append("git.merge_main_allowed must remain false before acceptance")
-    if git_state.get("push_origin_main_allowed") is not False:
-        failures.append("git.push_origin_main_allowed must remain false before acceptance")
-
     control = _mapping(state.get("control_plane"), "control_plane", failures)
     status = control.get("status")
     manual_acceptance = control.get("manual_acceptance")
@@ -182,6 +177,12 @@ def check_state_schema(state: dict[str, object]) -> list[str]:
             "control_plane.manual_acceptance does not match status: "
             f"expected {expected_manual}, got {manual_acceptance}"
         )
+
+    accepted_closeout = status == "accepted_closed" and manual_acceptance == "accepted"
+    if git_state.get("merge_main_allowed") is not False and not accepted_closeout:
+        failures.append("git.merge_main_allowed must remain false before acceptance")
+    if git_state.get("push_origin_main_allowed") is not False and not accepted_closeout:
+        failures.append("git.push_origin_main_allowed must remain false before acceptance")
 
     bootstrap_allowed = control.get("bootstrap_in_place_allowed")
     if not isinstance(bootstrap_allowed, bool):
@@ -293,6 +294,7 @@ def check_git_consistency(
 ) -> list[str]:
     failures: list[str] = []
     git_state = _mapping(state.get("git"), "git", failures)
+    control = _mapping(state.get("control_plane"), "control_plane", failures)
     baseline = str(git_state.get("baseline_commit", ""))
     branch = str(git_state.get("authorized_work_branch", ""))
     baseline_branch = str(git_state.get("baseline_branch", ""))
@@ -319,17 +321,31 @@ def check_git_consistency(
     if ancestor.returncode != 0:
         failures.append("baseline commit is not an ancestor of HEAD")
 
-    protected_refs = {
-        f"refs/heads/{baseline_branch}": baseline,
-        f"refs/remotes/origin/{baseline_branch}": baseline,
-    }
-    for reference, expected in protected_refs.items():
+    head = _git_text(git_root, "rev-parse", "HEAD")
+    accepted_main_integration = (
+        control.get("status") == "accepted_closed"
+        and control.get("manual_acceptance") == "accepted"
+        and branch == baseline_branch
+        and git_state.get("merge_main_allowed") is True
+        and git_state.get("push_origin_main_allowed") is True
+    )
+    protected_refs = (
+        f"refs/heads/{baseline_branch}",
+        f"refs/remotes/origin/{baseline_branch}",
+    )
+    for reference in protected_refs:
         resolved = _git(git_root, "rev-parse", "--verify", reference)
         if resolved.returncode != 0:
             failures.append(f"protected ref is missing: {reference}")
-        elif resolved.stdout.strip() != expected:
+            continue
+        actual = resolved.stdout.strip()
+        if accepted_main_integration:
+            allowed = {head} if reference.startswith("refs/heads/") else {baseline, head}
+        else:
+            allowed = {baseline}
+        if actual not in allowed:
             failures.append(
-                f"protected ref moved: {reference}={resolved.stdout.strip()}, expected {expected}"
+                f"protected ref moved: {reference}={actual}, expected one of {sorted(allowed)}"
             )
     return failures
 
@@ -356,6 +372,7 @@ def check_worktree_consistency(
     git_state = _mapping(state.get("git"), "git", failures)
     control = _mapping(state.get("control_plane"), "control_plane", failures)
     branch = str(git_state.get("authorized_work_branch", ""))
+    baseline_branch = str(git_state.get("baseline_branch", ""))
     root = git_root.resolve()
 
     try:
@@ -376,7 +393,14 @@ def check_worktree_consistency(
     git_marker = root / ".git"
     is_linked_worktree = git_marker.is_file()
     bootstrap_allowed = control.get("bootstrap_in_place_allowed") is True
-    if not is_linked_worktree and not bootstrap_allowed:
+    accepted_main_checkout = (
+        control.get("status") == "accepted_closed"
+        and control.get("manual_acceptance") == "accepted"
+        and branch == baseline_branch
+        and git_state.get("merge_main_allowed") is True
+        and git_state.get("push_origin_main_allowed") is True
+    )
+    if not is_linked_worktree and not bootstrap_allowed and not accepted_main_checkout:
         failures.append("Full ALE requires a linked worktree after bootstrap closes")
     return failures
 
