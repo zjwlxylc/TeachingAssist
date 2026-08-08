@@ -7,6 +7,7 @@ import {
   Card,
   CardContent,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -206,6 +207,7 @@ export function StudentPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [snackError, setSnackError] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
   const [activeStudentSection, setActiveStudentSection] = useState<StudentSectionKey>("signin");
   const activeStudentSectionRef = useRef<StudentSectionKey>("signin");
   const socketRef = useRef<TeachingAssistSocket | null>(null);
@@ -594,6 +596,7 @@ export function StudentPage() {
       setError("请填写课堂 ID、学号和姓名");
       return;
     }
+    setSigningIn(true);
     try {
       const signInResult = await studentSignIn(sessionId, studentId, name);
       setResult(signInResult);
@@ -616,6 +619,8 @@ export function StudentPage() {
       } else {
         setError(error.message);
       }
+    } finally {
+      setSigningIn(false);
     }
   }
 
@@ -981,6 +986,20 @@ export function StudentPage() {
     useStatusStore.getState().setStudentLoggedIn(Boolean(result));
   }, [result]);
 
+  function studentSectionUnread(section: StudentSectionKey) {
+    if (section === "announcements") return announcementUnread;
+    if (section === "interaction") return interactionUnread;
+    if (section === "messages") return messagesUnread;
+    return 0;
+  }
+
+  function selectStudentSection(section: StudentSectionKey) {
+    setActiveStudentSection(section);
+    if (section === "announcements") setAnnouncementUnread(0);
+    if (section === "interaction") setInteractionUnread(0);
+    if (section === "messages") setMessagesUnread(0);
+  }
+
   return (
     <Box
       sx={{
@@ -990,9 +1009,34 @@ export function StudentPage() {
         alignItems: "start",
       }}
     >
+      <Box sx={{ display: { xs: "block", md: "none" } }}>
+        <FormControl fullWidth size="small">
+          <InputLabel id="student-section-label">学生功能</InputLabel>
+          <Select
+            labelId="student-section-label"
+            label="学生功能"
+            value={activeStudentSection}
+            onChange={(event) => selectStudentSection(event.target.value as StudentSectionKey)}
+          >
+            {STUDENT_SECTIONS.map((section) => {
+              const unread = studentSectionUnread(section.key);
+              return (
+                <MenuItem key={section.key} value={section.key}>
+                  {section.label}{unread > 0 ? `（${unread} 条未读）` : ""}
+                </MenuItem>
+              );
+            })}
+          </Select>
+        </FormControl>
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, px: 0.5 }}>
+          {STUDENT_SECTIONS.find((section) => section.key === activeStudentSection)?.description}
+        </Typography>
+      </Box>
+
       <Paper
         variant="outlined"
         sx={{
+          display: { xs: "none", md: "block" },
           position: { xs: "static", md: "sticky" },
           top: { md: 16 },
           p: 1,
@@ -1002,10 +1046,7 @@ export function StudentPage() {
       >
         <Stack spacing={0.75}>
           {STUDENT_SECTIONS.map((section) => {
-            const unread =
-              section.key === "announcements" ? announcementUnread :
-              section.key === "interaction" ? interactionUnread :
-              section.key === "messages" ? messagesUnread : 0;
+            const unread = studentSectionUnread(section.key);
             const labelNode = (
               <Box>
                 <Typography component="span" sx={{ display: "block", fontWeight: 700, lineHeight: 1.3 }}>
@@ -1021,12 +1062,7 @@ export function StudentPage() {
                 key={section.key}
                 fullWidth
                 variant={activeStudentSection === section.key ? "contained" : "text"}
-                onClick={() => {
-                  setActiveStudentSection(section.key);
-                  if (section.key === "announcements") setAnnouncementUnread(0);
-                  if (section.key === "interaction") setInteractionUnread(0);
-                  if (section.key === "messages") setMessagesUnread(0);
-                }}
+                onClick={() => selectStudentSection(section.key)}
                 sx={{
                   justifyContent: "flex-start",
                   alignItems: "flex-start",
@@ -1079,6 +1115,12 @@ export function StudentPage() {
                     </Button>
                   </Stack>
 
+                  {activeSessions.length === 0 && (
+                    <Alert severity="info">
+                      当前没有进行中的课堂。请点击“刷新”，或输入教师提供的课堂 ID 查询。
+                    </Alert>
+                  )}
+
                   <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
                     <TextField
                       label="课堂 ID"
@@ -1101,7 +1143,13 @@ export function StudentPage() {
 
                   <TextField label="学号" value={studentId} onChange={(event) => setStudentId(event.target.value)} fullWidth />
                   <TextField label="姓名" value={name} onChange={(event) => setName(event.target.value)} fullWidth />
-                  <Button variant="contained" startIcon={<LoginIcon />} onClick={handleSignIn}>
+                  <Button
+                    variant="contained"
+                    startIcon={signingIn ? <CircularProgress size={18} color="inherit" /> : <LoginIcon />}
+                    onClick={handleSignIn}
+                    disabled={signingIn}
+                    aria-busy={signingIn}
+                  >
                     提交签到
                   </Button>
 
@@ -1260,13 +1308,13 @@ export function StudentPage() {
                     </Alert>
                   )}
 
-                  {/* 消息列表容器 - 固定高度，可滚动 */}
+                  {/* 消息列表容器 - 自适应视口高度，可滚动 */}
                   <Paper
                     variant="outlined"
                     sx={{
                       p: 2,
-                      minHeight: 400,
-                      maxHeight: 500,
+                      minHeight: 420,
+                      maxHeight: "calc(100vh - 200px)",
                       overflow: "auto",
                       bgcolor: "background.default"
                     }}
@@ -1618,17 +1666,19 @@ export function StudentPage() {
         </Dialog>
 
         {/* WebSocket 连接状态指示器 */}
-        <ConnectionIndicator
-          status={wsStatus}
-          onRetry={() => {
-            if (socketRef.current) {
-              socketRef.current.connect();
-            }
-            if (privateSocketRef.current) {
-              privateSocketRef.current.connect();
-            }
-          }}
-        />
+        {currentSession && (
+          <ConnectionIndicator
+            status={wsStatus}
+            onRetry={() => {
+              if (socketRef.current) {
+                socketRef.current.connect();
+              }
+              if (privateSocketRef.current) {
+                privateSocketRef.current.connect();
+              }
+            }}
+          />
+        )}
       </Stack>
     </Box>
   );

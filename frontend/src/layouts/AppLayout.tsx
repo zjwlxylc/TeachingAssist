@@ -140,6 +140,7 @@ export function AppLayout({ children }: PropsWithChildren) {
         component="aside"
         aria-label="开源仓库入口"
         sx={{
+          display: { xs: "none", sm: "block" },
           position: "fixed",
           right: { xs: 8, sm: 16 },
           top: { xs: 56, sm: 64 },
