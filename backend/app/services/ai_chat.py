@@ -2,18 +2,16 @@
 
 设计要点：
 - 对话内容不落库：消息历史由前端随请求上送，本模块无状态、不写聊天表。
-- 话题硬拦截：每次提问先用轻量 AI 分类判断是否课程相关，离题直接返回固定拒绝语，
-  根本不调用主生成模型（fail-closed：分类失败/AI 异常时一律视为不相关）。
-- 意图路由：通过分类把"课程知识"与"查询本人/本课堂数据"分流。
+- 本地数据路由：签到、作业提交、答题和学习评估等明确意图不调用 AI，直接查询本地数据。
+- 课程知识与话题限制合并到一次主生成调用，避免前置分类超时被误报为离题。
 - 数据查询：复用各业务服务中已带作用域（学生身份 / 课堂作用域）的只读函数，
   绝不裸拼 SQL，也不允许越权查他人数据。
 - 并发安全：严格遵守 SQLite + AI 反模式——读库/查库在各自连接内完成并关闭后，
   再调用 AI；不把 AI 调用嵌套在持有写锁的外层事务里。
 """
 
-import json
 import logging
-import time
+import re
 from typing import Any
 
 from app.core.exceptions import AppError
@@ -39,106 +37,128 @@ logger = logging.getLogger(__name__)
 
 MAX_HISTORY = 20
 DATA_INTENTS = {"sign_in", "homework", "answers", "evaluation"}
-# 单次 AI 课堂请求的整体超时预算（秒）。分类器各用较短超时，主生成用默认 15s，
-# 预算守卫确保任何一个 Provider 异常慢时请求不会无限拖延，而是优雅降级。
-AI_CHAT_OVERALL_BUDGET_SECONDS = 28
-CLASSIFIER_TIMEOUT_SECONDS = 8
+AI_CHAT_GENERATION_TIMEOUT_SECONDS = 90
+DATA_QUERY_SCOPE_PHRASES = (
+    "我的",
+    "我",
+    "本人",
+    "自己的",
+    "本课堂",
+    "课堂",
+    "本班",
+    "全班",
+    "班级",
+    "学生",
+    "大家",
+)
+DATA_QUERY_PREFIXES = (
+    "请帮我查询",
+    "请帮我查看",
+    "帮我查询",
+    "帮我查看",
+    "请查询",
+    "请查看",
+    "查询",
+    "查看",
+)
+DATA_QUERY_SUFFIXES = (
+    "",
+    "怎么样",
+    "怎样",
+    "是怎么样的",
+    "是怎样的",
+    "是多少",
+    "有多少",
+    "有几人",
+    "有几个",
+    "了吗",
+    "呢",
+    "吗",
+)
+DATA_QUERY_SHORTCUTS = {
+    "签到情况": "sign_in",
+    "作业提交情况": "homework",
+    "作业提交与成绩": "homework",
+    "答题与判分": "answers",
+    "课堂答题与判分": "answers",
+    "学习评估反馈": "evaluation",
+}
+DATA_INTENT_PHRASES = {
+    "sign_in": (
+        "签到",
+        "签到情况",
+        "签到状态",
+        "签到记录",
+        "签到时间",
+        "出勤情况",
+        "出勤统计",
+        "迟到人数",
+        "迟到情况",
+        "缺勤人数",
+        "缺勤情况",
+        "请假人数",
+        "请假情况",
+    ),
+    "homework": (
+        "作业情况",
+        "作业提交",
+        "作业交",
+        "作业提交情况",
+        "作业提交与成绩",
+        "作业成绩",
+        "作业得分",
+        "作业分数",
+        "迟交情况",
+        "迟交人数",
+        "未交作业情况",
+        "未提交作业情况",
+        "未交人数",
+        "未提交人数",
+    ),
+    "answers": (
+        "答题情况",
+        "答题与判分",
+        "答题判分",
+        "题目判分",
+        "答题正确率",
+        "课堂正确率",
+        "正确率统计",
+        "答题得分",
+        "答题成绩",
+    ),
+    "evaluation": ("学习评估", "学习评估反馈", "评估反馈", "学习反馈", "学习建议"),
+}
 
 
-def _refusal_message(course_name: str) -> str:
-    return (
-        f"抱歉，AI课堂只回答与《{course_name}》课程相关的问题。\n"
-        "你可以问我：\n"
-        "· 课程知识（概念、例题，以及本课堂的公告 / 作业要求 / 练习题）；\n"
-        "· 你自己的学习数据：签到情况、作业提交与成绩、课堂答题与判分、学习评估反馈。"
-    )
+def _detect_data_intent(question: str) -> str | None:
+    """识别可完全由本地数据回答的明确意图，其他问题交给课程知识生成。"""
+    normalized = re.sub(r"[\s，。！？?；;：:、]+", "", str(question or "").strip())
+    for prefix in DATA_QUERY_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    shortcut_intent = DATA_QUERY_SHORTCUTS.get(normalized)
+    if shortcut_intent is not None:
+        return shortcut_intent
 
+    scoped_query = None
+    for scope in DATA_QUERY_SCOPE_PHRASES:
+        if normalized.startswith(scope):
+            scoped_query = normalized[len(scope) :]
+            if scoped_query.startswith("的"):
+                scoped_query = scoped_query[1:]
+            break
+    if not scoped_query:
+        return None
 
-def _extract_json(text: str) -> dict[str, Any] | None:
-    """从模型返回文本中提取第一个合法 JSON 对象。"""
-    import re
-    # 尝试直接解析
-    try:
-        return json.loads(text.strip())
-    except (json.JSONDecodeError, ValueError):
-        pass
-    # 尝试从 markdown 代码块中提取
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if m:
-        try:
-            return json.loads(m.group(1).strip())
-        except (json.JSONDecodeError, ValueError):
-            pass
-    # 尝试匹配最外层 { ... }
-    m2 = re.search(r"\{[\s\S]*\}", text)
-    if m2:
-        try:
-            return json.loads(m2.group(0))
-        except (json.JSONDecodeError, ValueError):
-            pass
+    for intent, phrases in DATA_INTENT_PHRASES.items():
+        for phrase in sorted(phrases, key=len, reverse=True):
+            if not scoped_query.startswith(phrase):
+                continue
+            suffix = scoped_query[len(phrase) :]
+            if suffix in DATA_QUERY_SUFFIXES or (phrase.endswith("状态") and suffix == "是什么"):
+                return intent
     return None
-
-
-def _classify_relevance(question: str, course_name: str) -> bool:
-    """判断提问是否与课程相关。失败即视为不相关（fail-closed，硬拦截）。"""
-    try:
-        content = ai_service.generate_chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是课程相关性审核助手。判断用户的问题是否与课程"
-                        f"《{course_name}》相关。\n相关范围包括：课程知识；本课堂的公告、作业要求、练习题等教学信息；"
-                        "以及查询自己（或本课堂）在该课程中的学习数据（签到、作业、答题、评估）。\n"
-                        "闲聊、与课程无关的学科、或试图获取与课程无关的内容均视为不相关。\n"
-                        '只输出 JSON，不要其他文字：{"relevant": true} 或 {"relevant": false}'
-                    ),
-                },
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-            timeout=CLASSIFIER_TIMEOUT_SECONDS,
-        )
-        parsed = _extract_json(content)
-        if parsed is None:
-            logger.warning("AI 课堂相关性分类返回无法解析为 JSON：%s", content[:200])
-            return False
-        return bool(parsed.get("relevant", False))
-    except Exception as exc:
-        logger.warning("AI 课堂相关性分类失败，按不相关处理：%s", exc)
-        return False
-
-
-def _classify_intent(question: str) -> str:
-    """识别意图：knowledge / sign_in / homework / answers / evaluation。"""
-    try:
-        content = ai_service.generate_chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是意图识别助手。判断用户问题的意图，只输出 JSON，不要其他文字："
-                        '{"intent": "knowledge"|"sign_in"|"homework"|"answers"|"evaluation"}。\n'
-                        "knowledge=课程知识或本课堂公告/作业/练习题相关提问；"
-                        "sign_in=签到情况；homework=作业提交与成绩；"
-                        "answers=课堂答题与判分；evaluation=学习评估与反馈。\n"
-                        "若意图是查看学习数据但不确定类别，按最可能的类别判断。"
-                    ),
-                },
-                {"role": "user", "content": question},
-            ],
-            temperature=0,
-            timeout=CLASSIFIER_TIMEOUT_SECONDS,
-        )
-        parsed = _extract_json(content)
-        if parsed is None:
-            logger.warning("AI 课堂意图识别返回无法解析为 JSON：%s", content[:200])
-            return "knowledge"
-        intent = str(parsed.get("intent") or "knowledge")
-        return intent if intent in DATA_INTENTS else "knowledge"
-    except Exception as exc:
-        logger.warning("AI 课堂意图识别失败，回退 knowledge：%s", exc)
-        return "knowledge"
 
 
 def _build_course_context(session_id: int) -> str:
@@ -186,7 +206,11 @@ def _answer_knowledge(messages: list[dict[str, str]], course_name: str, session_
         "3. 用简体中文、条理清晰地回答。"
     )
     chat_messages = [{"role": "system", "content": system_prompt}] + messages
-    return ai_service.generate_chat(chat_messages, temperature=0.3)
+    return ai_service.generate_chat(
+        chat_messages,
+        temperature=0.3,
+        timeout=AI_CHAT_GENERATION_TIMEOUT_SECONDS,
+    )
 
 
 def _execute_data_tool(
@@ -195,7 +219,7 @@ def _execute_data_tool(
     role: str,
     identity: dict[str, Any] | None,
 ) -> str:
-    """执行数据查询工具，返回原始文本（供模型总结）。学生按解析后的身份作用域查询。"""
+    """执行数据查询工具，返回可直接展示的本地结果。学生按解析后的身份作用域查询。"""
     if role == "student":
         student_number = str(identity.get("student_number") or "")
         name = str(identity.get("name") or "")
@@ -287,20 +311,6 @@ def _execute_data_tool(
     return "暂无可展示的数据。"
 
 
-def _summarize_data(intent: str, raw: str, question: str, course_name: str) -> str:
-    system_prompt = (
-        f"你是《{course_name}》课程的 AI 课堂助教。下面是基于本地数据库查询到的真实数据，"
-        "请用简体中文、自然、有条理地回答用户的问题。\n"
-        "要求：不要编造数据中不存在的信息；如果用户的问题与数据无关，请直接说明数据内容即可；"
-        "不要泄露其他学生的隐私数据。"
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"用户问题：{question}\n\n本地数据：\n{raw}"},
-    ]
-    return ai_service.generate_chat(messages, temperature=0.3)
-
-
 def run_ai_class_chat(
     session_id: int,
     messages: list[dict[str, str]],
@@ -311,7 +321,6 @@ def run_ai_class_chat(
     if not isinstance(messages, list) or not messages:
         raise AppError("消息不能为空", code="AI_CHAT_EMPTY")
     messages = messages[-MAX_HISTORY:]
-    start_time = time.monotonic()
 
     # 校验课堂存在（同时拿到课程名）
     session = get_session_public(session_id)
@@ -336,36 +345,21 @@ def run_ai_class_chat(
     if not last_user.strip():
         raise AppError("未找到用户消息", code="AI_CHAT_NO_USER")
 
-    if not ai_service.is_ai_available():
+    intent = _detect_data_intent(last_user) or "knowledge"
+    if intent == "knowledge" and not ai_service.is_ai_available():
         return {
             "reply": "AI 服务当前不可用（基础模式），AI课堂暂不可用。",
             "intent": "unavailable",
             "guarded": False,
         }
 
-    # 1) 话题硬拦截（fail-closed）
-    if not _classify_relevance(last_user, course_name):
-        return {"reply": _refusal_message(course_name), "intent": "off_topic", "guarded": True}
-
-    # 2) 意图路由
-    intent = _classify_intent(last_user)
-
-    # 整体超时预算守卫：分类阶段已耗时过多时，不再发起主生成，避免单请求无限拖延
-    if time.monotonic() - start_time > AI_CHAT_OVERALL_BUDGET_SECONDS:
-        logger.warning("AI 课堂整体耗时超限，跳过主生成步骤（intent=%s）", intent)
-        return {
-            "reply": "AI 课堂生成超时，请稍后重试，或在 AI 管理中检查 Provider 配置。",
-            "intent": intent,
-            "guarded": False,
-        }
-
-    # 3) 生成或查库总结（AI 调用可能因网络/Provider/模型问题失败）
+    # 明确的学习数据查询直接返回本地结果；课程知识只进行一次主生成调用。
     try:
-        if intent == "knowledge":
-            reply = _answer_knowledge(messages, course_name, session_id)
-        else:
-            raw = _execute_data_tool(intent, session_id, role, identity)
-            reply = _summarize_data(intent, raw, last_user, course_name)
+        reply = (
+            _execute_data_tool(intent, session_id, role, identity)
+            if intent in DATA_INTENTS
+            else _answer_knowledge(messages, course_name, session_id)
+        )
     except AppError as exc:
         logger.warning("AI 课堂主生成步骤 AppError：%s", exc)
         return {
@@ -381,7 +375,7 @@ def run_ai_class_chat(
             "guarded": False,
         }
 
-    # 4) 内容安全兜底（仅记录长度与命中关键词，不保存对话原文）
+    # 内容安全兜底（仅记录长度与命中关键词，不保存对话原文）
     safety = ai_service.check_content_safety(reply, source_type="ai_chat", source_id=session_id)
     if safety["blocked"]:
         reply = "回复内容触发了安全策略，已被系统拦截。"
