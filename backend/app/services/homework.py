@@ -63,6 +63,19 @@ def _homework_upload_root(homework_id: int, submission_id: int | None = None) ->
     return path
 
 
+def get_download_file(file_id: int, *, submission: bool = False) -> dict[str, Any]:
+    table = "homework_submission_files" if submission else "homework_attachments"
+    with get_connection() as connection:
+        row = connection.execute(f"SELECT file_path, original_name FROM {table} WHERE id = ?", (file_id,)).fetchone()
+    if row is None:
+        raise AppError("附件不存在", code="ATTACHMENT_NOT_FOUND", status_code=404)
+    uploads_dir = get_settings().storage.uploads_dir
+    path = Path(row["file_path"]).resolve()
+    if uploads_dir is None or not path.is_relative_to((uploads_dir / "homework").resolve()) or not path.is_file():
+        raise AppError("附件文件不存在或路径无效", code="ATTACHMENT_NOT_FOUND", status_code=404)
+    return {"path": path, "filename": row["original_name"]}
+
+
 def _load_homework(connection: Any, homework_id: int) -> dict[str, Any]:
     row = connection.execute(
         """

@@ -1,13 +1,29 @@
-from fastapi import APIRouter, Depends, Request, Response
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Header, Request, Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
 from app.services import classroom as classroom_service
 from app.services import enrollment as enrollment_service
+from app.services import student_auth
 
 
 router = APIRouter(prefix="/classroom", tags=["classroom"])
+
+
+@router.get("/student/session", response_model=ApiResponse[dict[str, object]])
+def restore_student_session(authorization: str | None = Header(default=None)) -> ApiResponse[dict[str, object]]:
+    token = authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
+    return ok(classroom_service.get_student_session(token))
+
+
+@router.delete("/student/session", response_model=ApiResponse[dict[str, object]])
+def logout_student_session(authorization: str | None = Header(default=None)) -> ApiResponse[dict[str, object]]:
+    token = authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
+    student_auth.revoke_student_session(token)
+    return ok({"logged_out": True})
 
 
 class StudentSignInRequest(BaseModel):
@@ -20,6 +36,19 @@ class SignInStatusRequest(BaseModel):
     student_pk: int
     status: str
     reason: str | None = None
+
+
+class SignInModeRequest(BaseModel):
+    mode: Literal["open", "paused"]
+
+
+@router.put("/sessions/{session_id}/sign-in-mode", response_model=ApiResponse[dict[str, object]])
+def set_sign_in_mode(
+    session_id: int,
+    payload: SignInModeRequest,
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(classroom_service.set_sign_in_mode(session_id, payload.mode), message="签到控制已更新")
 
 
 @router.post("/sessions/{session_id}/start", response_model=ApiResponse[dict[str, object]])

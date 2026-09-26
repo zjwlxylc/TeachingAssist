@@ -25,6 +25,7 @@ export interface ClassroomSession {
   title: string;
   session_no: number;
   status: string;
+  sign_in_mode?: "automatic" | "open" | "paused";
   start_time: string | null;
   end_time: string | null;
   is_makeup: number;

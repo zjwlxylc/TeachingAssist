@@ -34,9 +34,8 @@ def update_access_info(
     payload: AccessInfoRequest,
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
-    # 持久化教师选择的访问配置，避免下次进入时丢失。
-    save_selected_access(payload.selected_ip, payload.selected_port)
-    return ok(get_access_info(payload.selected_ip, payload.selected_port))
+    # 兼容旧客户端的刷新请求；课堂地址由当前物理网卡与运行端口自动决定。
+    return ok(get_access_info())
 
 
 @router.get("/backups", response_model=ApiResponse[list[dict[str, object]]])

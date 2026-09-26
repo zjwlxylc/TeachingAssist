@@ -88,7 +88,6 @@ import {
   fetchBackups,
   fetchHealth,
   fetchStartupStatus,
-  updateAccessInfo,
   AccessInfo,
   BackupRecord,
   HealthStatus,
@@ -109,6 +108,7 @@ import {
   fetchSignInSummary,
   reviewDeviceAlert,
   startClassroomSession,
+  setClassroomSignInMode,
   updateSignInStatus,
   EnrollmentApplication,
   EnrollmentApplicationWithSession,
@@ -141,6 +141,7 @@ import {
   addHomeworkAttachments,
   createHomework,
   downloadHomeworkSubmissions,
+  downloadSubmissionFile,
   fetchHomework,
   fetchHomeworkSubmissionSummary,
   publishHomeworkGrades,
@@ -367,6 +368,7 @@ export function TeacherPage() {
   const [aiSessionId, setAiSessionId] = useState<number | "">("");
   const [interactionSettings, setInteractionSettings] = useState<InteractionSettings | null>(null);
   const [interactionMessages, setInteractionMessages] = useState<InteractionMessage[]>([]);
+  const latestInteractionIdRef = useRef(0);
   const [interactionContent, setInteractionContent] = useState("");
   const [moderationLogs, setModerationLogs] = useState<InteractionModerationLog[]>([]);
   const [moderationLoading, setModerationLoading] = useState(false);
@@ -443,8 +445,6 @@ export function TeacherPage() {
   const [aiFailureTaskCount, setAiFailureTaskCount] = useState(0);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [selectedIp, setSelectedIp] = useState("");
-  const [selectedPort, setSelectedPort] = useState<number | "">("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -491,17 +491,34 @@ export function TeacherPage() {
       .catch((err: Error) => setError(err.message));
   }, []);
 
-  // 当前课程变化时，加载该课程已关联的班级，供“课前准备”勾选上课班级
+  // 切换课程时清除旧课程的勾选，避免把旧班级带入新课堂。
+  useEffect(() => {
+    setSelectedClassIds([]);
+  }, [selectedCourseId]);
+
+  // 课程或班级数据更新后刷新关联列表；忽略切换课程前的过期请求。
   useEffect(() => {
     if (selectedCourseId === "") {
       setCourseLinkedClasses([]);
       setSelectedClassIds([]);
       return;
     }
+    let cancelled = false;
+    setCourseLinkedClasses([]);
     fetchClasses(Number(selectedCourseId))
-      .then(setCourseLinkedClasses)
-      .catch(() => setCourseLinkedClasses([]));
-  }, [selectedCourseId]);
+      .then((linkedClasses) => {
+        if (cancelled) return;
+        setCourseLinkedClasses(linkedClasses);
+        setSelectedClassIds((ids) => ids.filter((id) => linkedClasses.some((klass) => klass.id === id)));
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setSelectedClassIds([]);
+          setError(err.message);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [selectedCourseId, classes]);
 
   // Auto-logout when backend reports token expired (401)
   useEffect(() => {
@@ -530,9 +547,7 @@ export function TeacherPage() {
     ])
       .then(([accessData, aiData, aiTasks, backupData, courseData, classData, sessionData, studentData]) => {
         setAccessInfo(accessData);
-        setSelectedIp(accessData.selected_ip);
-        setSelectedPort(accessData.port);
-        useStatusStore.getState().setTeacherAccessUrl(accessData.access_url);
+        useStatusStore.getState().setTeacherAccessUrl(accessData.lan_available ? accessData.student_url : null);
         applyAiOverview(aiData);
         setAiFailureTaskCount(aiTasks.length);
         setBackups(backupData);
@@ -591,16 +606,18 @@ export function TeacherPage() {
     }
   }
 
-  async function refreshAccessInfo() {
-    if (!selectedIp) {
-      return;
-    }
-    const data = await updateAccessInfo(selectedIp, selectedPort === "" ? undefined : selectedPort);
-    setAccessInfo(data);
-    setSelectedIp(data.selected_ip);
-    setSelectedPort(data.port);
-    setMessage("访问地址已更新");
-  }
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      fetchAccessInfo().then((data) => {
+        if (cancelled) return;
+        setAccessInfo(data);
+        useStatusStore.getState().setTeacherAccessUrl(data.lan_available ? data.student_url : null);
+      }).catch(() => { /* 网络恢复后下一轮自动刷新 */ });
+    }, 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [isAuthenticated]);
 
   function applyAiOverview(data: AiOverview, resetForm: boolean = true) {
     setAiOverview(data);
@@ -766,8 +783,13 @@ export function TeacherPage() {
   }
 
   async function handleCreateClass() {
+    const name = className.trim();
+    if (!name) {
+      setError("请先填写班级名称");
+      return;
+    }
     try {
-      const klass = await createClass(className);
+      const klass = await createClass(name);
       setClassName("");
       setSelectedClassId(klass.id);
       setImportTargetClassId(klass.id);
@@ -1031,6 +1053,22 @@ export function TeacherPage() {
     }
   }
 
+  const [signInControlBusy, setSignInControlBusy] = useState(false);
+
+  async function handleSignInMode(sessionId: number, mode: "open" | "paused") {
+    setSignInControlBusy(true);
+    try {
+      const updated = await setClassroomSignInMode(sessionId, mode);
+      setSessions((current) => current.map((item) => item.id === sessionId ? updated : item));
+      setSignInSummary((current) => current?.session.id === sessionId ? { ...current, session: updated } : current);
+      setMessage(mode === "paused" ? "已暂停正常签到，之后签到记为迟到" : "已继续签到，之后签到记为正常");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSignInControlBusy(false);
+    }
+  }
+
   async function handleLoadSignIns(sessionId: number) {
     try {
       const [summary, logs, alerts, applications, classes] = await Promise.all([
@@ -1276,12 +1314,14 @@ export function TeacherPage() {
   async function handleLoadInteraction(sessionId: number) {
     try {
       setInteractionSessionId(sessionId);
+      latestInteractionIdRef.current = 0;
       const [settings, messages] = await Promise.all([
         fetchInteractionSettings(sessionId),
         fetchInteractionMessages(sessionId)
       ]);
       setInteractionSettings(settings);
       setInteractionMessages(messages);
+      latestInteractionIdRef.current = messages.reduce((max, item) => Math.max(max, item.id), 0);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1305,9 +1345,10 @@ export function TeacherPage() {
       return;
     }
     try {
-      await publishTeacherInteractionMessage(Number(interactionSessionId), interactionContent);
+      const posted = await publishTeacherInteractionMessage(Number(interactionSessionId), interactionContent);
       setInteractionContent("");
-      setInteractionMessages(await fetchInteractionMessages(Number(interactionSessionId)));
+      latestInteractionIdRef.current = Math.max(latestInteractionIdRef.current, posted.id);
+      setInteractionMessages((current) => current.some((item) => item.id === posted.id) ? current : [posted, ...current]);
       setMessage("课堂互动消息已发送");
     } catch (err) {
       setError((err as Error).message);
@@ -1392,10 +1433,38 @@ export function TeacherPage() {
     };
   }, [isAuthenticated, activeTeacherSection]);
 
-  // 课堂模块实时接收学生注册申请：为所有 active 课堂建立 WS，监听 enrollment.application.created。
+  // 登录后持续同步待审批申请，补偿断线、漏收事件以及其他教师的审批操作。
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setGlobalPendingApps([]);
+      return undefined;
+    }
+    let disposed = false;
+    let loading = false;
+    const refresh = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const apps = await fetchPendingEnrollments();
+        if (!disposed) setGlobalPendingApps(apps);
+      } catch {
+        /* 网络恢复后下一次轮询重试，保留已知申请。 */
+      } finally {
+        loading = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [isAuthenticated]);
+
+  // 在所有教师页面接收学生注册申请，切换模块不会中断提醒。
   // 学生一提交，教师端红点即时 +1，且若正在查看该课堂签到面板则同步插入列表。
   useEffect(() => {
-    if (activeTeacherSection !== "classroom") return undefined;
+    if (!isAuthenticated) return undefined;
     const activeSessions = sessions.filter((s) => s.status === "active");
     if (activeSessions.length === 0) return undefined;
     const sockets = activeSessions.map((s) => {
@@ -1431,21 +1500,32 @@ export function TeacherPage() {
     return () => {
       sockets.forEach((sc) => sc.close());
     };
-  }, [activeTeacherSection, sessions]);
+  }, [isAuthenticated, sessions]);
 
   // 课堂互动 WebSocket：只要已选定互动课堂（无论是否停留在互动模块）就保持监听，
   // 这样老师不在互动模块时也能通过左栏红点感知新留言。
   useEffect(() => {
-    if (!interactionSessionId) {
+    if (!isAuthenticated || !interactionSessionId) {
       return undefined;
     }
     const sessionId = Number(interactionSessionId);
+    let disposed = false;
+    const mergeNewMessages = (items: InteractionMessage[]) => {
+      if (disposed || !items.length) return;
+      latestInteractionIdRef.current = Math.max(latestInteractionIdRef.current, ...items.map((item) => item.id));
+      setInteractionMessages((current) => {
+        const next = new Map<number, InteractionMessage>();
+        [...items, ...current].forEach((item) => next.set(item.id, item));
+        return Array.from(next.values()).sort((a, b) => b.id - a.id);
+      });
+    };
     void loadModerationLogs(sessionId);
     const socket = new TeachingAssistSocket(
       classroomSocketUrl(sessionId),
       (event) => {
         const payload = JSON.parse(event.data) as InteractionMessageCreated | InteractionModerated;
         if (payload.type === "interaction.message.created") {
+          mergeNewMessages([payload.message]);
           if (activeTeacherSectionRef.current !== "interaction") {
             setInteractionUnread((current) => current + 1);
           }
@@ -1459,10 +1539,17 @@ export function TeacherPage() {
       3000
     );
     socket.connect();
+    const poll = window.setInterval(() => {
+      void fetchInteractionMessages(sessionId, latestInteractionIdRef.current || undefined)
+        .then(mergeNewMessages)
+        .catch(() => undefined);
+    }, 5000);
     return () => {
+      disposed = true;
+      window.clearInterval(poll);
       socket.close();
     };
-  }, [interactionSessionId]);
+  }, [isAuthenticated, interactionSessionId]);
 
   // 全局轮询私信未读总数：使左栏「私信」红点实时反映服务端未读，
   // 不依赖是否停留在私信模块（进入模块读取会话后会自动回落）。
@@ -2386,7 +2473,14 @@ export function TeacherPage() {
                           ))}
                         </FormGroup>
                       )}
-                      <Button variant="outlined" startIcon={<AddIcon />} onClick={handleCreateClass}>
+                      <Button
+                        variant="outlined"
+                        startIcon={<AddIcon />}
+                        onClick={() => {
+                          setError("");
+                          selectTeacherSection("classgroup");
+                        }}
+                      >
                         新建班级
                       </Button>
                       <FormControl fullWidth>
@@ -3188,8 +3282,22 @@ export function TeacherPage() {
                               disabled={session.status === "ended"}
                               onClick={() => handleEndSession(session.id)}
                             >
-                              结束
+                              结束课堂
                             </Button>
+                            {session.status === "active" && (
+                              <>
+                                <Button size="small" variant="outlined" color="warning"
+                                  disabled={signInControlBusy || session.sign_in_mode === "paused"}
+                                  onClick={() => handleSignInMode(session.id, "paused")}>
+                                  暂停签到
+                                </Button>
+                                <Button size="small" variant="contained" color="success"
+                                  disabled={signInControlBusy || session.sign_in_mode === "open"}
+                                  onClick={() => handleSignInMode(session.id, "open")}>
+                                  继续签到
+                                </Button>
+                              </>
+                            )}
                             <Button
                               size="small"
                               variant="outlined"
@@ -3199,6 +3307,14 @@ export function TeacherPage() {
                               签到统计
                             </Button>
                           </Stack>
+                          {session.status === "active" && (
+                            <Typography variant="body2" color="text.secondary">
+                              {session.sign_in_mode === "paused" ? "已暂停：新签到记为迟到。下一班上课时点击继续签到。"
+                                : session.sign_in_mode === "open" ? "签到开放：新签到记为正常，直到老师暂停签到。"
+                                : "当前按开课时间自动判定迟到；分班上课请点击继续签到，改由老师手动控制。"}
+                              {session.end_time ? ` 本课堂仍将在 ${session.end_time} 自动结束。` : " 所有班级完成后再结束课堂。"}
+                            </Typography>
+                          )}
                         </Stack>
                       </Paper>
                     ))}
@@ -3557,44 +3673,25 @@ export function TeacherPage() {
                       退出
                     </Button>
                   </Stack>
-                  <Grid container spacing={2}>
-                    <Grid item xs={12} md={6}>
-                      <FormControl fullWidth>
-                        <InputLabel id="network-ip-label">访问 IP</InputLabel>
-                        <Select
-                          labelId="network-ip-label"
-                          label="访问 IP"
-                          value={selectedIp}
-                          onChange={(event) => setSelectedIp(event.target.value)}
-                        >
-                          {accessInfo.candidates.map((item) => (
-                            <MenuItem key={item.ip} value={item.ip}>
-                              {item.name}：{item.ip}
-                            </MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                    <Grid item xs={12} md={3}>
-                      <TextField
-                        label="端口"
-                        type="number"
-                        value={selectedPort}
-                        onChange={(event) => setSelectedPort(Number(event.target.value))}
-                        fullWidth
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={3}>
-                      <Button variant="outlined" onClick={refreshAccessInfo} fullWidth sx={{ height: "100%" }}>
-                        更新
-                      </Button>
-                    </Grid>
-                  </Grid>
-                  <Alert severity="success">课堂访问地址：{accessInfo.access_url}</Alert>
-                  <Alert severity={accessInfo.firewall.rule_exists ? "success" : "warning"}>
-                    {accessInfo.firewall.message}
-                  </Alert>
-                  <Typography color="text.secondary">管理员命令：{accessInfo.firewall.admin_command}</Typography>
+                  {accessInfo.lan_available ? (
+                    <>
+                      <Typography color="text.secondary">学生连接同一机房网络，在浏览器打开：</Typography>
+                      <Typography variant="h5" sx={{ overflowWrap: "anywhere", userSelect: "all" }}>
+                        {accessInfo.student_url}
+                      </Typography>
+                      <Button variant="contained" onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(accessInfo.student_url);
+                          setMessage("学生访问地址已复制");
+                        } catch {
+                          setError("请选中上方地址，按 Ctrl+C 复制");
+                        }
+                      }}>复制学生地址</Button>
+                      <Typography color="text.secondary" variant="body2">地址已自动获取，无需设置 IP 或端口。</Typography>
+                    </>
+                  ) : (
+                    <Alert severity="warning">请先连接机房网线或 Wi-Fi，连接后会自动显示学生地址。</Alert>
+                  )}
                 </Stack>
               </CardContent>
             </Card>
@@ -4253,9 +4350,14 @@ export function TeacherPage() {
                                     {record.files.length > 0 && (
                                       <Stack spacing={0.25} sx={{ mt: 0.75 }}>
                                         {record.files.map((file) => (
-                                          <Typography key={`${record.submission_id}-${file.original_name}`} variant="body2" color="text.secondary">
+                                          <Button
+                                            key={`${record.submission_id}-${file.original_name}`}
+                                            size="small"
+                                            disabled={file.id == null}
+                                            onClick={() => file.id != null && downloadSubmissionFile(file.id, file.original_name).catch((err: Error) => setError(err.message))}
+                                          >
                                             {file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
-                                          </Typography>
+                                          </Button>
                                         ))}
                                       </Stack>
                                     )}

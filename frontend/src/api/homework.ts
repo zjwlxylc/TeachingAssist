@@ -1,5 +1,13 @@
 import { downloadFile, request } from "./http";
 
+export function downloadHomeworkAttachment(fileId: number, fileName: string) {
+  return downloadFile(`/homework/attachments/${fileId}/download`, fileName);
+}
+
+export function downloadSubmissionFile(fileId: number, fileName: string) {
+  return downloadFile(`/homework/submission-files/${fileId}/download`, fileName);
+}
+
 export interface HomeworkAttachment {
   id: number;
   homework_id?: number;

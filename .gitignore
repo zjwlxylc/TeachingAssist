@@ -32,6 +32,8 @@ Thumbs.db
 build/
 dist/
 *.zip
+*.zip.sha256
 *.7z
 *.exe
 *.spec
+TeachingAssist-Classroom-r*/

@@ -1,9 +1,24 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
+set "TEACHING_ASSIST_LAUNCH_EXE=%~dp0TeachingAssist.exe"
+
+if exist "TeachingAssist.exe" (
+  if exist "ensure_classroom_access.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure_classroom_access.ps1" -ProgramPath "%~dp0TeachingAssist.exe"
+    if errorlevel 1 (
+      echo Network setup needs Windows approval. Students may not be able to connect yet.
+      pause
+    )
+  )
+)
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports = @(8080, 8081, 8888); foreach ($port in $ports) { try { $r = Invoke-WebRequest -UseBasicParsing -Uri ('http://127.0.0.1:' + $port + '/api/v1/auth/status') -TimeoutSec 1; if ($r.StatusCode -eq 200) { $url = 'http://127.0.0.1:' + $port; Write-Host ('TeachingAssist is already running: ' + $url); Start-Process $url; exit 0 } } catch {} }; exit 1"
+  "$ports = @(8080, 8081, 8888); foreach ($port in $ports) { try { $r = Invoke-WebRequest -UseBasicParsing -Uri ('http://127.0.0.1:' + $port + '/api/v1/auth/status') -TimeoutSec 1; if ($r.StatusCode -eq 200) { if (Test-Path -LiteralPath $env:TEACHING_ASSIST_LAUNCH_EXE) { $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | ForEach-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Path }); if ($owners -notcontains $env:TEACHING_ASSIST_LAUNCH_EXE) { Write-Host 'An older TeachingAssist service is running. Close its server window, then start this version again.'; exit 2 } }; $url = 'http://127.0.0.1:' + $port; Write-Host ('TeachingAssist is already running: ' + $url); Start-Process $url; exit 0 } } catch {} }; exit 1"
+if errorlevel 2 (
+  pause
+  exit /b 2
+)
 if not errorlevel 1 (
   pause
   exit /b 0

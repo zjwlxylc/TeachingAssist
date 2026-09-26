@@ -61,6 +61,13 @@ def resolve_student_by_token(token: str | None) -> dict[str, Any] | None:
     return {"student_id": int(data["student_id"]), "session_id": int(data["session_id"])}
 
 
+def revoke_student_session(token: str | None) -> None:
+    if not token:
+        return
+    with get_connection() as connection:
+        connection.execute("DELETE FROM student_sessions WHERE token_hash = ?", (_hash_token(token),))
+
+
 def verify_student_token_for_session(token: str | None, expected_session_id: int) -> int | None:
     """校验令牌且要求令牌绑定的 session 与当前资源一致，返回 student 主键或 None。
 
@@ -73,4 +80,3 @@ def verify_student_token_for_session(token: str | None, expected_session_id: int
     if int(identity["session_id"]) != int(expected_session_id):
         return None
     return int(identity["student_id"])
-

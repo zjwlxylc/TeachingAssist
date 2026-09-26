@@ -837,8 +837,8 @@ def export_question_answers(session_id: int) -> dict[str, Any]:
 
 def get_question_answers_detail(question_id: int) -> dict[str, Any]:
     """返回某题所有学生作答详情（教师端批阅用），含解析后的 AI 反馈。"""
-    question = _load_question_by_id(question_id)
     with get_connection() as connection:
+        question = _load_question(connection, question_id)
         rows = connection.execute(
             """
             SELECT qa.id AS answer_id,
@@ -858,7 +858,7 @@ def get_question_answers_detail(question_id: int) -> dict[str, Any]:
             FROM question_answers qa
             JOIN students s ON s.id = qa.student_id
             WHERE qa.question_id = ? AND qa.is_latest = 1
-            ORDER BY s.student_number ASC, qa.submitted_at DESC
+            ORDER BY s.student_id ASC, qa.submitted_at DESC
             """,
             (question_id,),
         ).fetchall()

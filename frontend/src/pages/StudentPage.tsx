@@ -25,6 +25,7 @@ import ChatBubble from "../components/ChatBubble";
 import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import LoginIcon from "@mui/icons-material/Login";
+import LogoutIcon from "@mui/icons-material/Logout";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
 import AssignmentIcon from "@mui/icons-material/Assignment";
@@ -42,6 +43,8 @@ import {
   fetchActiveSessions,
   fetchPublicSession,
   studentSignIn,
+  restoreStudentSession,
+  revokeStudentSession,
   StudentSignInResult,
   createEnrollmentApplication,
   EnrollmentApplication
@@ -58,6 +61,7 @@ import {
 import {
   Homework,
   HomeworkSubmitResult,
+  downloadHomeworkAttachment,
   fetchHomeworkFeedback,
   fetchPublicHomework,
   submitHomework
@@ -88,6 +92,7 @@ import { AIChatPanel } from "../components/AIChatPanel";
 import { useStatusStore } from "../store/statusStore";
 import { translateError } from "../utils/errorMessages";
 import { ConnectionIndicator, ConnectionStatus } from "../components/ConnectionIndicator";
+import { clearStudentSession, readStudentSession, saveStudentSession } from "../utils/studentSession";
 
 type ClassroomMessage =
   | AnnouncementMessage
@@ -218,6 +223,13 @@ export function StudentPage() {
     activeStudentSectionRef.current = activeStudentSection;
   }, [activeStudentSection]);
 
+  useEffect(() => {
+    if (studentToken && result && questions.length) {
+      void restoreServerDrafts(questions);
+      void refreshMyAnswers();
+    }
+  }, [studentToken, result?.id, questions]);
+
   // error 自动消失：5 秒后清空，用户手动关闭则取消计时器
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -254,6 +266,20 @@ export function StudentPage() {
 
     let disposed = false;
     const sessionId = currentSession.id;
+    const saved = readStudentSession();
+    if (saved && saved.sessionId === sessionId) {
+      void restoreStudentSession(saved.token)
+        .then((record) => {
+          if (disposed) return;
+          setStudentId(record.student_number);
+          setName(record.student_name);
+          setResult({ ...record, token: saved.token });
+          setStudentToken(saved.token);
+        })
+        .catch(() => {
+          if (!disposed) clearStudentSession();
+        });
+    }
     const mergeAnnouncements = (items: Announcement[]) => {
       items.forEach((item) => {
         lastAnnouncementIdRef.current = Math.max(lastAnnouncementIdRef.current, item.id);
@@ -353,8 +379,14 @@ export function StudentPage() {
     );
     socketRef.current = socket;
     socket.connect();
+    const interactionPoll = window.setInterval(() => {
+      void fetchInteractionMessages(sessionId, lastInteractionMessageIdRef.current || undefined)
+        .then((items) => { if (!disposed) mergeInteractionMessages(items); })
+        .catch(() => undefined);
+    }, 5000);
     return () => {
       disposed = true;
+      window.clearInterval(interactionPoll);
       socket.close();
     };
   }, [currentSession?.id]);
@@ -449,7 +481,13 @@ export function StudentPage() {
     try {
       const sessions = await fetchActiveSessions();
       setActiveSessions(sessions);
-      if (sessions.length && !selectedSessionId) {
+      const saved = readStudentSession();
+      if (saved) {
+        const session = sessions.find((item) => item.id === saved.sessionId) ?? await fetchPublicSession(saved.sessionId);
+        setSelectedSessionId(session.id);
+        setSessionIdInput(String(session.id));
+        setCurrentSession(session);
+      } else if (sessions.length && !selectedSessionId) {
         setSelectedSessionId(sessions[0].id);
         setSessionIdInput(String(sessions[0].id));
         setCurrentSession(sessions[0]);
@@ -462,6 +500,7 @@ export function StudentPage() {
   async function loadSession(sessionId: number) {
     try {
       const session = await fetchPublicSession(sessionId);
+      if (readStudentSession()?.sessionId !== sessionId) clearStudentSession();
       setCurrentSession(session);
       setSelectedSessionId(session.id);
       setSessionIdInput(String(session.id));
@@ -599,6 +638,7 @@ export function StudentPage() {
     setSigningIn(true);
     try {
       const signInResult = await studentSignIn(sessionId, studentId, name);
+      if (signInResult.token) saveStudentSession({ sessionId, token: signInResult.token });
       setResult(signInResult);
       setStudentToken(signInResult.token ?? null);
       setMessage(signInResult.duplicate ? "你已经完成过签到" : "签到成功");
@@ -668,14 +708,11 @@ export function StudentPage() {
       setError("互动留言不能为空");
       return;
     }
-    // 检查 WebSocket 连接状态
-    if (wsStatus === "disconnected") {
-      setError("网络连接已断开，请等待重新连接后再发送");
-      return;
-    }
     setSendingInteraction(true);
     try {
-      await publishStudentInteractionMessage(sessionId, studentId, name, interactionContent);
+      const posted = await publishStudentInteractionMessage(sessionId, studentId, name, interactionContent);
+      lastInteractionMessageIdRef.current = Math.max(lastInteractionMessageIdRef.current, posted.id);
+      setInteractionMessages((current) => current.some((item) => item.id === posted.id) ? current : [posted, ...current]);
       setInteractionContent("");
       setMessage("互动留言已发送");
     } catch (err) {
@@ -1000,6 +1037,35 @@ export function StudentPage() {
     if (section === "messages") setMessagesUnread(0);
   }
 
+  function handleStudentLogout() {
+    const token = readStudentSession()?.token ?? studentToken;
+    clearStudentSession();
+    if (token) void revokeStudentSession(token).catch(() => undefined);
+    setResult(null);
+    setStudentToken(null);
+    setStudentId("");
+    setName("");
+    setAnswers({});
+    setSavedDrafts({});
+    setPrivateContent("");
+    setInteractionContent("");
+    setHomeworkText({});
+    setHomeworkFiles({});
+    setPrivateMessages([]);
+    setSubmittedQuestions({});
+    setSubmittedHomework({});
+    setMyAnswers({});
+    setHomeworkFeedback({});
+    setEvaluationFeedback(null);
+    setShowEnrollmentForm(false);
+    setEnrollmentResult(null);
+    setCurrentSession(null);
+    setSelectedSessionId("");
+    setSessionIdInput("");
+    setActiveStudentSection("signin");
+    setMessage("已退出学生端");
+  }
+
   return (
     <Box
       sx={{
@@ -1087,6 +1153,11 @@ export function StudentPage() {
 
       <Stack spacing={3} sx={{ minWidth: 0 }}>
         {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
+        {result && (
+          <Stack direction="row" justifyContent="flex-end">
+            <Button variant="outlined" startIcon={<LogoutIcon />} onClick={handleStudentLogout}>退出学生端</Button>
+          </Stack>
+        )}
 
         {activeStudentSection === "signin" && (
           <Box>
@@ -1141,13 +1212,13 @@ export function StudentPage() {
                     </Alert>
                   )}
 
-                  <TextField label="学号" value={studentId} onChange={(event) => setStudentId(event.target.value)} fullWidth />
-                  <TextField label="姓名" value={name} onChange={(event) => setName(event.target.value)} fullWidth />
+                  <TextField label="学号" value={studentId} onChange={(event) => setStudentId(event.target.value)} disabled={Boolean(result)} fullWidth />
+                  <TextField label="姓名" value={name} onChange={(event) => setName(event.target.value)} disabled={Boolean(result)} fullWidth />
                   <Button
                     variant="contained"
                     startIcon={signingIn ? <CircularProgress size={18} color="inherit" /> : <LoginIcon />}
                     onClick={handleSignIn}
-                    disabled={signingIn}
+                    disabled={signingIn || Boolean(result)}
                     aria-busy={signingIn}
                   >
                     提交签到
@@ -1335,7 +1406,7 @@ export function StudentPage() {
                           name={item.sender_name}
                           time={item.created_at}
                           content={item.content}
-                          selfName={name || "我"}
+                          selfName={item.sender_role === "teacher" ? item.sender_name : name || "我"}
                         />
                       ))}
                     </Stack>
@@ -1415,9 +1486,14 @@ export function StudentPage() {
                             {homework.attachments?.length > 0 && (
                               <Stack spacing={0.25} sx={{ mt: 0.75 }}>
                                 {homework.attachments.map((file) => (
-                                  <Typography key={file.id} color="text.secondary" variant="body2">
+                                  <Button
+                                    key={file.id}
+                                    size="small"
+                                    onClick={() => downloadHomeworkAttachment(file.id, file.original_name).catch((err: Error) => setError(err.message))}
+                                    sx={{ justifyContent: "flex-start" }}
+                                  >
                                     教师附件：{file.original_name} ({Math.ceil(file.file_size / 1024)} KB)
-                                  </Typography>
+                                  </Button>
                                 ))}
                               </Stack>
                             )}

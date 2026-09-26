@@ -1,3 +1,4 @@
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -88,4 +89,9 @@ def get_settings() -> AppSettings:
     default_config = PROJECT_ROOT / "config" / "default.yaml"
     local_config = PROJECT_ROOT / "config" / "local.yaml"
     raw = _deep_merge(_load_yaml(default_config), _load_yaml(local_config))
+    smoke_root = os.environ.get("TEACHING_ASSIST_SMOKE_ROOT")
+    if smoke_root:
+        raw = _deep_merge(raw, {"storage": {"local_root": smoke_root, "database_path": None,
+                                              "uploads_dir": None, "backups_dir": None,
+                                              "logs_dir": None, "runtime_dir": None}})
     return AppSettings.model_validate(raw).normalized()

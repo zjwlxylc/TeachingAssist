@@ -1,6 +1,9 @@
 import os
+import json
+import ipaddress
 import socket
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 
 from app.core.config import get_settings
@@ -25,7 +28,61 @@ def _is_private_ipv4(ip: str) -> bool:
     )
 
 
+def _windows_network_candidates() -> list[dict[str, object]]:
+    if sys.platform != "win32":
+        return []
+    command = """
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $ErrorActionPreference = 'Stop'
+    @(Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' } | ForEach-Object {
+        $adapter = $_
+        foreach ($address in $adapter.IPv4Address) {
+            [pscustomobject]@{
+                name = $adapter.InterfaceAlias
+                description = $adapter.InterfaceDescription
+                ip = $address.IPAddress
+                virtual = ($adapter.NetAdapter.HardwareInterface -eq $false)
+                gateway = [bool]$adapter.IPv4DefaultGateway
+            }
+        }
+    }) | ConvertTo-Json -Compress
+    """
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8-sig", errors="replace", timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return []
+        rows = json.loads(completed.stdout)
+        if isinstance(rows, dict):
+            rows = [rows]
+        result = []
+        for row in rows:
+            address = ipaddress.IPv4Address(row["ip"])
+            if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+                continue
+            name = str(row["name"])
+            description = str(row.get("description", ""))
+            result.append({"name": name, "ip": str(address), "gateway": bool(row.get("gateway")),
+                           "virtual": bool(row.get("virtual")) or any(word in (name + description).lower() for word in VIRTUAL_KEYWORDS)})
+        return result
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
+        return []
+
+
 def list_network_candidates() -> list[dict[str, object]]:
+    adapters = _windows_network_candidates()
+    if sys.platform == "win32" and not adapters:
+        return [asdict(NetworkCandidate(name="等待物理网卡连接", ip="127.0.0.1", selected=True))]
+    if adapters:
+        adapters = [item for item in adapters if not item["virtual"]]
+        if not adapters:
+            return [asdict(NetworkCandidate(name="未连接课堂网络", ip="127.0.0.1", selected=True))]
+        adapters.sort(key=lambda item: (bool(item["virtual"]), not bool(item["gateway"]), str(item["ip"])))
+        return [asdict(NetworkCandidate(name=str(item["name"]), ip=str(item["ip"]), selected=index == 0))
+                for index, item in enumerate(adapters)]
     hostname = socket.gethostname()
     ips: set[str] = set()
     try:
@@ -64,10 +121,7 @@ def choose_access_port() -> dict[str, object]:
         settings = get_settings()
         return {"port": port, "available": True, "fallback_used": port != settings.server.port}
     settings = get_settings()
-    for port in [settings.server.port, *settings.server.fallback_ports]:
-        if is_port_available(port):
-            return {"port": port, "available": True, "fallback_used": port != settings.server.port}
-    return {"port": settings.server.port, "available": False, "fallback_used": False}
+    return {"port": settings.server.port, "available": True, "fallback_used": False}
 
 
 def save_selected_access(selected_ip: str | None, selected_port: int | None) -> None:
@@ -98,15 +152,21 @@ def load_selected_access() -> tuple[str | None, int | None]:
 
 def get_access_info(selected_ip: str | None = None, selected_port: int | None = None) -> dict[str, object]:
     candidates = list_network_candidates()
-    stored_ip, stored_port = load_selected_access()
-    ip = selected_ip or stored_ip or str(candidates[0]["ip"])
+    # 课堂入口完全自动，不再沿用旧机器或人工保存的网络配置。
+    candidates = candidates[:1]
+    ip = str(candidates[0]["ip"])
     port_info = choose_access_port()
-    port = selected_port or stored_port or int(port_info["port"])
+    # 界面选择不会重新绑定服务器端口；已启动的服务必须公布实际监听端口。
+    port = int(port_info["port"])
+    for candidate in candidates:
+        candidate["selected"] = candidate["ip"] == ip
     return {
         "candidates": candidates,
         "selected_ip": ip,
         "port": port,
         "access_url": f"http://{ip}:{port}",
+        "student_url": f"http://{ip}:{port}/student",
+        "lan_available": ip != "127.0.0.1",
         "port_status": port_info,
         "firewall": check_firewall(port),
     }

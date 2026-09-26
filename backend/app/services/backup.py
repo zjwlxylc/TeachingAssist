@@ -1,7 +1,6 @@
-import os
-import shutil
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -22,14 +21,17 @@ def _timestamp() -> str:
 def _verify_sqlite_integrity(path: Path) -> None:
     """以只读方式校验 SQLite 文件完整性，损坏则拒绝使用（不污染线上库）。"""
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         raise AppError(f"备份文件无法打开或不是有效的 SQLite 数据库: {exc}", code="BACKUP_INVALID", status_code=422)
     try:
         rows = conn.execute("PRAGMA integrity_check").fetchall()
         status = [row[0] for row in rows]
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        required_tables = {"schema_migrations", "teachers", "courses", "classes", "backup_records"}
+        if not required_tables.issubset(tables):
+            raise AppError("文件不是有效的教学系统备份，已拒绝恢复", code="BACKUP_SCHEMA_INVALID", status_code=422)
     except sqlite3.Error as exc:
-        conn.close()
         raise AppError(f"备份文件完整性校验失败: {exc}", code="BACKUP_INTEGRITY_FAILED", status_code=422)
     finally:
         conn.close()
@@ -142,16 +144,12 @@ def restore_backup(file_path: str) -> dict[str, object]:
     safety_dir.mkdir(parents=True, exist_ok=True)
     safety_backup = safety_dir / f"before_restore_{_timestamp()}.db"
     if database_path.exists():
-        shutil.copy2(database_path, safety_backup)
-        _record_backup("before_restore", "local", safety_backup, "success")
+        # SQLite backup 包含已提交的 WAL 数据，直接复制主文件会遗漏这些数据。
+        with closing(sqlite3.connect(database_path)) as live, closing(sqlite3.connect(safety_backup)) as safety:
+            live.backup(safety)
 
-    # 原子替换：先拷到同目录临时文件，再用 os.replace 一次性换入，
-    # 避免直接覆盖正在被服务打开的库文件时出现半写状态。
-    # 注意：若服务正在运行并持有 WAL 连接，仍建议先停止服务再恢复。
-    temp_path = database_path.parent / f".restore_tmp_{uuid.uuid4().hex}.db"
-    try:
-        shutil.copy2(source, temp_path)
-        os.replace(temp_path, database_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    # 使用 SQLite 的事务化恢复，兼容仍打开的连接；不能替换正在使用的数据库文件。
+    with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as saved, closing(sqlite3.connect(database_path)) as live:
+        saved.backup(live)
+    _record_backup("before_restore", "local", safety_backup, "success")
     return {"restored_from": str(source), "safety_backup": str(safety_backup)}

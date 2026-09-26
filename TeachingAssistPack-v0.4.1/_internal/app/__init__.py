@@ -1,1 +1,0 @@
-"""Teaching Assist backend package."""

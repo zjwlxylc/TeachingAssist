@@ -1,5 +1,5 @@
 import { ClassroomSession } from "./academic";
-import { downloadFile, request } from "./http";
+import { ApiResponse, downloadFile, request } from "./http";
 import { getBrowserSessionId } from "../utils/deviceFingerprint";
 
 export interface SignInRecord {
@@ -71,6 +71,13 @@ export function startClassroomSession(sessionId: number) {
   });
 }
 
+export function setClassroomSignInMode(sessionId: number, mode: "open" | "paused") {
+  return request<ClassroomSession>(`/classroom/sessions/${sessionId}/sign-in-mode`, {
+    method: "PUT",
+    body: JSON.stringify({ mode })
+  });
+}
+
 export function endClassroomSession(sessionId: number) {
   return request<SignInSummary>(`/classroom/sessions/${sessionId}/end`, {
     method: "POST"
@@ -118,6 +125,23 @@ export function studentSignIn(sessionId: number, studentId: string, name: string
       name,
       device_hash: browserSessionId,
     }),
+  });
+}
+
+export async function restoreStudentSession(token: string) {
+  // Student token expiry must not log a teacher out of another tab.
+  const response = await fetch("/api/v1/classroom/student/session", {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const payload = await response.json() as ApiResponse<StudentSignInResult>;
+  if (!response.ok || !payload.success) throw new Error(payload.message || "学生登录已失效");
+  return payload.data;
+}
+
+export function revokeStudentSession(token: string) {
+  return fetch("/api/v1/classroom/student/session", {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` }
   });
 }
 

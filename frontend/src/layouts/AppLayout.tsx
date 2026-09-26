@@ -52,7 +52,7 @@ export function AppLayout({ children }: PropsWithChildren) {
         { label: "教师工作台", value: teacherHealthStatus ? "运行中" : "检测中", color: teacherHealthStatus ? "success.main" : "text.disabled" },
         { label: "系统管理", value: teacherHealthStatus ? "正常" : "检测中", color: teacherHealthStatus ? "success.main" : "text.disabled" },
         { label: "教师认证", value: isAuthenticated ? "已认证" : "未认证", color: isAuthenticated ? "success.main" : "warning.main" },
-        { label: "学生访问地址", value: teacherAccessUrl || "待配置", color: teacherAccessUrl ? "success.main" : "warning.main" },
+        { label: "学生访问地址", value: teacherAccessUrl || "等待网络连接", color: teacherAccessUrl ? "success.main" : "warning.main" },
         { label: "数据库备份", value: teacherDbIntegrity === "ok" ? "正常" : (teacherDbIntegrity || "检测中"), color: teacherDbIntegrity === "ok" ? "success.main" : (teacherDbIntegrity ? "warning.main" : "text.disabled") },
       ]
     : isStudentRoute

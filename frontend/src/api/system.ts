@@ -32,6 +32,8 @@ export interface AccessInfo {
   selected_ip: string;
   port: number;
   access_url: string;
+  student_url: string;
+  lan_available: boolean;
   port_status: {
     port: number;
     available: boolean;

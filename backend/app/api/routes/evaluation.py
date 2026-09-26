@@ -36,7 +36,7 @@ def calculate_session(
     return ok(evaluation_service.calculate_session(session_id, payload.version_type), message="学习效果评估已生成")
 
 
-@router.get("/sessions/{session_id}", response_model=ApiResponse[dict[str, object]])
+@router.get("/sessions/{session_id:int}", response_model=ApiResponse[dict[str, object]])
 def session_report(
     session_id: int,
     _teacher: dict[str, object] = Depends(require_teacher),

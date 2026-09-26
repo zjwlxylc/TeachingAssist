@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse
 
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
@@ -7,6 +8,18 @@ from app.services import homework as homework_service
 
 
 router = APIRouter(prefix="/homework", tags=["homework"])
+
+
+@router.get("/attachments/{file_id}/download")
+def download_attachment(file_id: int) -> FileResponse:
+    file = homework_service.get_download_file(file_id)
+    return FileResponse(file["path"], filename=file["filename"], media_type="application/octet-stream")
+
+
+@router.get("/submission-files/{file_id}/download")
+def download_submission_file(file_id: int, _teacher: dict[str, object] = Depends(require_teacher)) -> FileResponse:
+    file = homework_service.get_download_file(file_id, submission=True)
+    return FileResponse(file["path"], filename=file["filename"], media_type="application/octet-stream")
 
 
 class HomeworkCreateRequest(BaseModel):

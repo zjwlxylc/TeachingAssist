@@ -258,6 +258,22 @@ def start_session(session_id: int) -> dict[str, Any]:
     return get_session_public(session_id)
 
 
+def set_sign_in_mode(session_id: int, mode: str) -> dict[str, Any]:
+    if mode not in {"open", "paused"}:
+        raise AppError("签到控制状态不支持", code="SIGN_IN_MODE_UNSUPPORTED")
+    refresh_session_statuses()
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        session = _load_session(connection, session_id)
+        if session["status"] != "active":
+            raise AppError("只有进行中的课堂可以暂停或继续签到", code="SESSION_NOT_ACTIVE", status_code=409)
+        connection.execute(
+            "UPDATE classroom_sessions SET sign_in_mode = ?, updated_at = datetime('now') WHERE id = ?",
+            (mode, session_id),
+        )
+    return get_session_public(session_id)
+
+
 def end_session(session_id: int) -> dict[str, Any]:
     refresh_session_statuses()
     should_backup = False
@@ -309,6 +325,29 @@ def list_active_sessions() -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
 
+def get_student_session(token: str | None) -> dict[str, Any]:
+    """Validate a browser-held student token and return its current attendance record."""
+    from app.services.student_auth import resolve_student_by_token
+
+    identity = resolve_student_by_token(token)
+    if identity is None:
+        raise AppError("学生登录已失效，请重新签到", code="STUDENT_SESSION_INVALID", status_code=401)
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT r.*, s.student_id AS student_number, s.name AS student_name
+            FROM sign_in_records r JOIN students s ON s.id = r.student_id
+            WHERE r.session_id = ? AND r.student_id = ?
+            """,
+            (identity["session_id"], identity["student_id"]),
+        ).fetchone()
+    if row is None:
+        raise AppError("签到记录不存在，请重新签到", code="STUDENT_SESSION_INVALID", status_code=401)
+    result = _row_to_dict(row)
+    result["duplicate"] = True
+    return result
+
+
 def student_sign_in(
     session_id: int,
     student_number: str,
@@ -324,6 +363,9 @@ def student_sign_in(
         raise AppError("学号和姓名不能为空", code="STUDENT_ID_NAME_REQUIRED")
 
     with get_connection() as connection:
+        # Serialize the first sign-in with teacher mode changes so classification
+        # uses the state at the time the sign-in is recorded.
+        connection.execute("BEGIN IMMEDIATE")
         session = _load_session(connection, session_id)
 
         # 先检查学号是否在名单中，无论课堂状态如何（支持课堂未开始时也能提交注册申请）
@@ -361,6 +403,7 @@ def student_sign_in(
             result = _row_to_dict(existing)
             result["duplicate"] = True
             # 重复签到也发放/轮换令牌，保证学生拿到有效私信身份
+            connection.commit()  # Release the lock before token creation opens another connection.
             result["token"] = student_auth.create_student_session(int(student["id"]), session_id)
             return result
 
@@ -373,6 +416,10 @@ def student_sign_in(
         deadline = started_at + timedelta(minutes=int(session.get("sign_in_deadline_minutes") or 15))
         sign_time = _now()
         status = "late" if sign_time > deadline else "normal"
+        if session.get("sign_in_mode") == "open":
+            status = "normal"
+        elif session.get("sign_in_mode") == "paused":
+            status = "late"
         cursor = connection.execute(
             """
             INSERT INTO sign_in_records(session_id, student_id, status, sign_time, ip_address, user_agent, device_hash)

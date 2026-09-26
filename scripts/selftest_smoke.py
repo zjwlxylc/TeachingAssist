@@ -1,20 +1,18 @@
 """迭代自检冒烟测试：逐模块验证后端改进。
 
 运行：PYTHONPATH=backend python scripts/selftest_smoke.py
-依赖 config/local.yaml 将 storage.local_root 指向隔离测试库（.selftest）。
+自动使用临时测试库，不读取或修改教学运行库。
 """
 import os
 import sys
 import traceback
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-# 确保使用隔离测试库（本地配置优先）
+# Importing test helpers must not create a database or replace global settings.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from fastapi.testclient import TestClient  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from app.main import create_app  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -58,15 +56,18 @@ def test_module1_auth_system_backup(client: TestClient, settings) -> None:
     check("module1: cached_replay 带 token 通过鉴权(非401)", r2.status_code != 401, f"status={r2.status_code}")
 
     # Fix3/4: 访问配置落库
+    current_access = client.get("/api/v1/system/access", headers=auth_headers(token)).json()["data"]
+    selected_ip = current_access["candidates"][0]["ip"]
     r = client.post(
         "/api/v1/system/access",
-        json={"selected_ip": "192.168.1.100", "selected_port": 8081},
+        json={"selected_ip": selected_ip, "selected_port": 8081},
         headers=auth_headers(token),
     )
     check("module1: 保存访问配置 200", r.status_code == 200, f"status={r.status_code}")
     r = client.get("/api/v1/system/access", headers=auth_headers(token))
     data = r.json().get("data", {})
-    check("module1: 访问配置持久化回读", data.get("selected_ip") == "192.168.1.100" and data.get("port") == 8081,
+    expected_port = current_access["port"]
+    check("module1: 访问配置持久化回读", data.get("selected_ip") == selected_ip and data.get("port") == expected_port,
           f"selected_ip={data.get('selected_ip')} port={data.get('port')}")
 
     # Fix2: 备份创建
@@ -304,6 +305,8 @@ def test_module2_student_token() -> None:
 
 
 def main() -> int:
+    from app.main import create_app
+
     settings = get_settings()
     print(f"测试库: {settings.storage.database_path}")
     app = create_app()
@@ -339,4 +342,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _test_directory = TemporaryDirectory(prefix="teaching-assist-smoke-")
+    os.environ["TEACHING_ASSIST_SMOKE_ROOT"] = _test_directory.name
+    get_settings.cache_clear()
+    try:
+        sys.exit(main())
+    finally:
+        import logging
+        logging.shutdown()
+        _test_directory.cleanup()
