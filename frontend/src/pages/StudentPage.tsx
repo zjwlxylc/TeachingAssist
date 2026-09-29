@@ -194,6 +194,8 @@ export function StudentPage() {
   const privateSocketRef = useRef<TeachingAssistSocket | null>(null);
   const lastPrivateMessageIdRef = useRef(0);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [questionsLoading, setQuestionsLoading] = useState(false);
+  const [questionLoadError, setQuestionLoadError] = useState("");
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [submittedQuestions, setSubmittedQuestions] = useState<Record<number, boolean>>({});
   const [showSignInGuide, setShowSignInGuide] = useState(false);
@@ -253,7 +255,6 @@ export function StudentPage() {
     setAnnouncementUnread(0);
     setInteractionMessages([]);
     setInteractionSettings(null);
-    setQuestions([]);
     setHomeworkList([]);
     setSubmittedQuestions({});
     setResult(null); // 切换课堂时清空上一课堂的签到结果，避免旧 result 误判已签到
@@ -302,24 +303,20 @@ export function StudentPage() {
     };
     const loadMessages = async (lastId?: number) => {
       try {
-        const [items, interactionSettingsData, interactionItems, questionItems, homeworkItems] = await Promise.all([
+        const [announcementsResult, settingsResult, interactionResult, homeworkResult] = await Promise.allSettled([
           fetchAnnouncements(sessionId, lastId),
           fetchInteractionSettings(sessionId),
           fetchInteractionMessages(sessionId, lastId ? lastInteractionMessageIdRef.current : undefined),
-          fetchPublicQuestions(sessionId),
           fetchPublicHomework(sessionId)
         ]);
         if (!disposed) {
-          mergeAnnouncements(items);
-          setInteractionSettings(interactionSettingsData);
-          mergeInteractionMessages(interactionItems);
-          if (questionItems.length) {
-            setQuestions(questionItems);
-          }
-          setHomeworkList(homeworkItems);
-          restoreLocalDrafts(questionItems);
-          void restoreServerDrafts(questionItems);
-          void refreshMyAnswers();
+          if (announcementsResult.status === "fulfilled") mergeAnnouncements(announcementsResult.value);
+          if (settingsResult.status === "fulfilled") setInteractionSettings(settingsResult.value);
+          if (interactionResult.status === "fulfilled") mergeInteractionMessages(interactionResult.value);
+          if (homeworkResult.status === "fulfilled") setHomeworkList(homeworkResult.value);
+          const failed = [announcementsResult, settingsResult, interactionResult, homeworkResult]
+            .find((item) => item.status === "rejected");
+          if (failed?.status === "rejected") setError(translateError(failed.reason as Error));
           void replayCachedRequests(sessionId);
         }
       } catch (err) {
@@ -353,6 +350,7 @@ export function StudentPage() {
           setInteractionSettings(payload.settings);
         }
         if (payload.type === "question.published") {
+          if (disposed || payload.session_id !== sessionId) return;
           setQuestions((current) => {
             const next = new Map<number, Question>();
             [payload.question, ...current].forEach((item) => next.set(item.id, item));
@@ -388,6 +386,42 @@ export function StudentPage() {
       disposed = true;
       window.clearInterval(interactionPoll);
       socket.close();
+    };
+  }, [currentSession?.id]);
+
+  useEffect(() => {
+    setQuestions([]);
+    setQuestionLoadError("");
+    setQuestionsLoading(Boolean(currentSession?.id));
+    if (!currentSession?.id) return undefined;
+
+    let disposed = false;
+    const sessionId = currentSession.id;
+    const refreshQuestions = async () => {
+      try {
+        const items = await fetchPublicQuestions(sessionId);
+        if (disposed) return;
+        setQuestions((current) => {
+          const byId = new Map(current.filter((item) => item.session_id === sessionId).map((item) => [item.id, item]));
+          items.forEach((item) => byId.set(item.id, item));
+          const next = Array.from(byId.values()).sort((a, b) => b.id - a.id);
+          return next.length === current.length && next.every((item, index) =>
+            item.id === current[index].id && item.updated_at === current[index].updated_at && item.status === current[index].status
+          ) ? current : next;
+        });
+        restoreLocalDrafts(items);
+        setQuestionLoadError("");
+      } catch (err) {
+        if (!disposed) setQuestionLoadError(translateError(err as Error));
+      } finally {
+        if (!disposed) setQuestionsLoading(false);
+      }
+    };
+    void refreshQuestions();
+    const timer = window.setInterval(() => void refreshQuestions(), 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
     };
   }, [currentSession?.id]);
 
@@ -545,13 +579,15 @@ export function StudentPage() {
     const drafts = readDrafts();
     setAnswers((current) => {
       const next = { ...current };
+      let changed = false;
       questionItems.forEach((question) => {
         const value = drafts[String(question.id)];
         if (value !== undefined && next[question.id] === undefined) {
           next[question.id] = value as string | string[];
+          changed = true;
         }
       });
-      return next;
+      return changed ? next : current;
     });
   }
 
@@ -1301,7 +1337,7 @@ export function StudentPage() {
                     </Box>
                   ))}
                   {announcements.length === 0 && (
-                    <Typography color="text.secondary">进入课堂后可查看教师发布的公告。</Typography>
+                    <Typography color="text.secondary">{currentSession ? "当前课堂暂无公告。" : "请先在课堂签到页选择课堂。"}</Typography>
                   )}
                 </Stack>
               </CardContent>
@@ -1313,6 +1349,12 @@ export function StudentPage() {
               <CardContent>
                 <Stack spacing={1.5}>
                   <Typography variant="h2">课堂问答</Typography>
+                  {currentSession && (
+                    <Typography color="text.secondary" variant="body2">
+                      当前课堂：{currentSession.title}（#{currentSession.id}）
+                    </Typography>
+                  )}
+                  {questionLoadError && <Alert severity="error">题目加载失败：{questionLoadError}。系统会自动重试。</Alert>}
                   {questions.map((question) => (
                     <Paper key={question.id} variant="outlined" sx={{ p: 2 }}>
                       <Stack spacing={1.5}>
@@ -1350,7 +1392,11 @@ export function StudentPage() {
                       {renderAnswerFeedback(question)}
                     </Paper>
                   ))}
-                  {questions.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的问题。</Typography>}
+                  {questions.length === 0 && !questionLoadError && (
+                    <Typography color="text.secondary">
+                      {!currentSession ? "请先在课堂签到页选择课堂。" : questionsLoading ? "正在加载课堂问题…" : "当前课堂尚未发布问题；已签到的同学无需重新签到，教师发布后会自动显示。"}
+                    </Typography>
+                  )}
                 </Stack>
               </CardContent>
             </Card>
@@ -1542,7 +1588,7 @@ export function StudentPage() {
                       </Paper>
                     );
                   })}
-                  {homeworkList.length === 0 && <Typography color="text.secondary">进入课堂后可查看教师发布的作业。</Typography>}
+                  {homeworkList.length === 0 && <Typography color="text.secondary">{currentSession ? "当前课堂暂无作业。" : "请先在课堂签到页选择课堂。"}</Typography>}
                 </Stack>
               </CardContent>
             </Card>

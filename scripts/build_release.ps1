@@ -33,6 +33,7 @@ if (-not $SkipPyInstaller) {
     --noconfirm `
     --name TeachingAssist `
     --paths backend `
+    --hidden-import app.main `
     --add-data "config;config" `
     --add-data "frontend\dist;frontend\dist" `
     --add-data "backend\app;app" `

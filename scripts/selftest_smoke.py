@@ -184,11 +184,11 @@ def test_module4_ai() -> None:
           f"action={safety_replace['action']} blocked={safety_replace['blocked']} text={safety_replace['text']}")
 
 
-def test_module4_apikey_encryption() -> None:
+def test_module4_apikey_plaintext() -> None:
     from app.db.session import get_connection
     from app.services import ai as ai_service
 
-    # 保存一个带 API Key 的 Provider，验证入库为密文、读出为明文
+    # 保存一个带 API Key 的 Provider，验证直接入库且无需额外密钥文件。
     saved = ai_service.save_provider({
         "provider_name": "selftest_enc",
         "display_name": "自检测密",
@@ -204,15 +204,15 @@ def test_module4_apikey_encryption() -> None:
                 "SELECT api_key FROM ai_provider_configs WHERE id = ?", (pid,)
             ).fetchone()
         raw_key = dict(raw)["api_key"]
-        check("module4: API Key 入库为密文(enc::前缀)", bool(raw_key) and raw_key.startswith("enc::"),
-              f"stored={raw_key[:12]}..." if raw_key else "stored=None")
-        # 读出应解密为原始明文
+        check("module4: API Key 直接保存在本机数据库", raw_key == "sk-SECRET-0123456789",
+              "stored key matches input" if raw_key == "sk-SECRET-0123456789" else "stored key differs")
+        # 业务读取到用户保存的 Key。
         ai_service.activate_provider(pid)
         with get_connection() as connection:
             active = ai_service._active_provider(connection)
-        check("module4: 读取 Provider 时 API Key 解密为明文",
+        check("module4: 读取 Provider 时得到保存的 API Key",
               active is not None and active["api_key"] == "sk-SECRET-0123456789",
-              f"decrypted={active['api_key'] if active else None}")
+              "key available" if active is not None and active["api_key"] == "sk-SECRET-0123456789" else "key unavailable")
     finally:
         with get_connection() as connection:
             connection.execute("DELETE FROM ai_provider_configs WHERE id = ?", (pid,))
@@ -327,9 +327,9 @@ def main() -> int:
         check("module4: 测试执行异常", False, traceback.format_exc())
 
     try:
-        test_module4_apikey_encryption()
+        test_module4_apikey_plaintext()
     except Exception:
-        check("module4: API Key 加密测试异常", False, traceback.format_exc())
+        check("module4: API Key 保存测试异常", False, traceback.format_exc())
 
     try:
         test_module2_student_token()

@@ -1,88 +1,68 @@
 import json
 import logging
-import os
 import re
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.db.session import get_connection
 
 try:
-    from cryptography.fernet import Fernet, InvalidToken
-except Exception:  # pragma: no cover - cryptography 为可选依赖，缺失时降级为明文
+    from cryptography.fernet import Fernet
+except ImportError:  # pragma: no cover - 仅用于转换旧版已加密的 Key
     Fernet = None
-    InvalidToken = Exception
 
 
 logger = logging.getLogger(__name__)
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_TIMEOUT_SECONDS = 5
-# API Key 静态加密前缀：标记该字段已加密，未带前缀的视为旧明文（兼容降级）
+# 旧版本的加密格式，仅用于一次性转换；新 Key 直接保存在本机数据库。
 ENCRYPTED_PREFIX = "enc::"
-_fernet_cache: Any = None
 
 
-def _get_fernet() -> Any:
-    """惰性加载/生成 Fernet 密钥，密钥文件存于 storage.local_root（与数据库同目录，不入库、不进代码）。"""
-    global _fernet_cache
-    if _fernet_cache is not None:
-        return _fernet_cache
-    if Fernet is None:
-        return None
-    from app.core.config import get_settings
-
-    settings = get_settings()
-    key_dir = Path(settings.storage.local_root) if getattr(settings.storage, "local_root", None) else Path(".")
-    key_dir.mkdir(parents=True, exist_ok=True)
-    key_path = key_dir / "ai_secret.key"
-    if key_path.exists():
-        key = key_path.read_bytes().strip()
-    else:
-        key = Fernet.generate_key()
-        key_path.write_bytes(key)
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            pass
-    _fernet_cache = Fernet(key)
-    return _fernet_cache
-
-
-def _encrypt_api_key(plain: str | None) -> str | None:
-    """加密 API Key 后再入库；加密不可用时降级为明文以保证可用。"""
-    if not plain:
-        return None
-    fernet = _get_fernet()
-    if fernet is None:
-        return plain
-    try:
-        token = fernet.encrypt(str(plain).encode("utf-8"))
-        return f"{ENCRYPTED_PREFIX}{token.decode('utf-8')}"
-    except Exception:
-        logger.warning("API Key 加密失败，降级为明文存储")
-        return plain
-
-
-def _decrypt_api_key(stored: str | None) -> str | None:
-    """解密入库的 API Key；解密失败或旧明文数据则原样返回（兼容降级）。"""
+def _usable_api_key(stored: str | None) -> str | None:
+    """旧密文在完成一次性转换前视为未配置，不能作为 API Key 发给服务商。"""
     if not stored:
         return None
     if stored.startswith(ENCRYPTED_PREFIX):
-        fernet = _get_fernet()
-        if fernet is None:
-            return stored
-        try:
-            token = stored[len(ENCRYPTED_PREFIX):].encode("utf-8")
-            return fernet.decrypt(token).decode("utf-8")
-        except (InvalidToken, Exception):
-            logger.warning("API Key 解密失败，按原文返回（可能密钥丢失）")
-            return stored
+        return None
     return stored
+
+
+def migrate_legacy_api_keys() -> int:
+    """有旧密钥文件时，把旧密文一次性改写为数据库明文；不创建新文件。"""
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id, api_key FROM ai_provider_configs WHERE api_key LIKE 'enc::%'"
+        ).fetchall()
+    if not rows:
+        return 0
+
+    key_path = get_settings().storage.local_root / "ai_secret.key"
+    if Fernet is None or not key_path.is_file():
+        logger.warning("旧版加密的 AI Key 无法转换，请在教师端重新填写")
+        return 0
+    try:
+        fernet = Fernet(key_path.read_bytes().strip())
+    except Exception:
+        logger.warning("旧版 AI 密钥文件不可用，请在教师端重新填写 Key")
+        return 0
+
+    converted: list[tuple[str, int]] = []
+    for row in rows:
+        try:
+            plain = fernet.decrypt(str(row["api_key"])[len(ENCRYPTED_PREFIX):].encode("utf-8")).decode("utf-8")
+            converted.append((plain, int(row["id"])))
+        except Exception:
+            logger.warning("一个旧版 AI Key 无法转换，请在教师端重新填写")
+    if converted:
+        with get_connection() as connection:
+            connection.executemany("UPDATE ai_provider_configs SET api_key = ? WHERE id = ?", converted)
+    return len(converted)
 
 DEGRADATION_STRATEGIES = [
     {
@@ -149,7 +129,7 @@ def _redact_secret(value: str | None) -> str | None:
 
 def _sanitize_provider(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
-    api_key = str(result.pop("api_key", "") or "")
+    api_key = _usable_api_key(str(result.pop("api_key", "") or ""))
     result["api_key_set"] = bool(api_key)
     result["api_key_masked"] = _redact_secret(api_key)
     result["enabled"] = bool(result.get("enabled"))
@@ -170,7 +150,7 @@ def _active_provider(connection: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     data = _row_to_dict(row)
-    data["api_key"] = _decrypt_api_key(data.get("api_key"))
+    data["api_key"] = _usable_api_key(data.get("api_key"))
     return data
 
 
@@ -256,7 +236,7 @@ def save_provider(payload: dict[str, Any], provider_id: int | None = None) -> di
                     display_name,
                     base_url,
                     model_name,
-                    _encrypt_api_key(str(api_key).strip()) if api_key else None,
+                    str(api_key).strip() if api_key else None,
                     http_proxy,
                     enabled,
                     "unknown" if enabled else "disabled",
@@ -282,7 +262,7 @@ def save_provider(payload: dict[str, Any], provider_id: int | None = None) -> di
                 fields.append("api_key = NULL")
             elif isinstance(api_key, str) and api_key.strip():
                 fields.append("api_key = ?")
-                values.append(_encrypt_api_key(api_key.strip()))
+                values.append(api_key.strip())
             values.append(provider_id)
             connection.execute(f"UPDATE ai_provider_configs SET {', '.join(fields)} WHERE id = ?", values)
         row = connection.execute("SELECT * FROM ai_provider_configs WHERE id = ?", (provider_id,)).fetchone()
@@ -453,7 +433,7 @@ def check_connectivity(provider_id: int | None = None) -> dict[str, Any]:
             row = connection.execute("SELECT * FROM ai_provider_configs WHERE id = ?", (provider_id,)).fetchone()
             provider = _row_to_dict(row) if row else None
             if provider is not None:
-                provider["api_key"] = _decrypt_api_key(provider.get("api_key"))
+                provider["api_key"] = _usable_api_key(provider.get("api_key"))
         if provider is None:
             raise AppError("未配置 AI Provider", code="AI_PROVIDER_NOT_CONFIGURED", status_code=404)
 

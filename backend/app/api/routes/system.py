@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel
 
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
-from app.services.backup import create_backup, list_backups, restore_backup
+from app.services.backup import create_backup, list_backups, restore_backup, restore_uploaded_backup
 from app.services.network import get_access_info, save_selected_access
 
 
@@ -54,3 +54,11 @@ def restore(
     _teacher: dict[str, object] = Depends(require_teacher),
 ) -> ApiResponse[dict[str, object]]:
     return ok(restore_backup(payload.file_path), message="备份已恢复")
+
+
+@router.post("/backups/upload-restore", response_model=ApiResponse[dict[str, object]])
+def restore_uploaded(
+    file: UploadFile = File(...),
+    _teacher: dict[str, object] = Depends(require_teacher),
+) -> ApiResponse[dict[str, object]]:
+    return ok(restore_uploaded_backup(file.filename or "", file.file), message="数据库已更新")

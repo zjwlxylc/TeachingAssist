@@ -3,14 +3,18 @@ import uuid
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
+from app.db.migrations import integrity_check, run_migrations
 from app.db.session import get_connection, get_database_path
+from app.services.ai import migrate_legacy_api_keys
 from app.services.startup import detect_removable_root
 
 
 BACKUP_KEEP_COUNT = 5
+MAX_RESTORE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _timestamp() -> str:
@@ -148,8 +152,52 @@ def restore_backup(file_path: str) -> dict[str, object]:
         with closing(sqlite3.connect(database_path)) as live, closing(sqlite3.connect(safety_backup)) as safety:
             live.backup(safety)
 
-    # 使用 SQLite 的事务化恢复，兼容仍打开的连接；不能替换正在使用的数据库文件。
-    with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as saved, closing(sqlite3.connect(database_path)) as live:
-        saved.backup(live)
-    _record_backup("before_restore", "local", safety_backup, "success")
+    # SQLite backup 可写入正在使用的数据库；随后补齐旧备份缺少的迁移。
+    # 任一步失败时用安全副本回退，避免留下半更新的课堂数据。
+    try:
+        with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)) as saved, closing(sqlite3.connect(database_path)) as live:
+            saved.backup(live)
+        run_migrations()
+        migrate_legacy_api_keys()
+        if integrity_check().lower() != "ok":
+            raise RuntimeError("restored database integrity check failed")
+        _record_backup("before_restore", "local", safety_backup, "success")
+    except Exception as exc:
+        if safety_backup.exists():
+            try:
+                with closing(sqlite3.connect(safety_backup)) as safety, closing(sqlite3.connect(database_path)) as live:
+                    safety.backup(live)
+            except Exception as rollback_exc:
+                raise AppError(
+                    f"数据库更新失败且自动回退失败，请使用安全备份 {safety_backup} 恢复",
+                    code="BACKUP_ROLLBACK_FAILED",
+                    status_code=500,
+                ) from rollback_exc
+            raise AppError("数据库更新失败，已自动恢复更新前的本机数据", code="BACKUP_RESTORE_FAILED", status_code=500) from exc
+        raise AppError("数据库更新失败，且未能生成本机安全备份", code="BACKUP_RESTORE_FAILED", status_code=500) from exc
     return {"restored_from": str(source), "safety_backup": str(safety_backup)}
+
+
+def restore_uploaded_backup(file_name: str, stream: BinaryIO) -> dict[str, object]:
+    """Stage a browser-selected SQLite backup and restore it to the configured local DB."""
+    if not file_name.lower().endswith(".db"):
+        raise AppError("请选择 .db 数据库备份文件", code="BACKUP_FILE_TYPE_INVALID", status_code=422)
+    backup_dir = get_settings().storage.backups_dir
+    if backup_dir is None:
+        raise AppError("本地备份目录未配置", code="BACKUP_DIR_NOT_CONFIGURED")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    incoming = backup_dir / f"incoming_{uuid.uuid4().hex}.db"
+    try:
+        size = 0
+        with incoming.open("xb") as staged:
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_RESTORE_UPLOAD_BYTES:
+                    raise AppError("数据库备份文件超过 2 GB，已停止上传", code="BACKUP_UPLOAD_TOO_LARGE", status_code=413)
+                staged.write(chunk)
+        if size == 0:
+            raise AppError("数据库备份文件为空", code="BACKUP_INVALID", status_code=422)
+        result = restore_backup(str(incoming))
+        return {"file_name": Path(file_name.replace("\\", "/")).name, "safety_backup": result["safety_backup"]}
+    finally:
+        incoming.unlink(missing_ok=True)

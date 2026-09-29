@@ -88,6 +88,7 @@ import {
   fetchBackups,
   fetchHealth,
   fetchStartupStatus,
+  updateDatabaseFromFile,
   AccessInfo,
   BackupRecord,
   HealthStatus,
@@ -308,6 +309,9 @@ export function TeacherPage() {
   const [accessInfo, setAccessInfo] = useState<AccessInfo | null>(null);
   const [aiOverview, setAiOverview] = useState<AiOverview | null>(null);
   const [backups, setBackups] = useState<BackupRecord[]>([]);
+  const [updatingDatabase, setUpdatingDatabase] = useState(false);
+  const [databaseUpdatedNotice, setDatabaseUpdatedNotice] = useState("");
+  const databaseFileInputRef = useRef<HTMLInputElement | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [classes, setClasses] = useState<ClassGroup[]>([]);
   const [sessions, setSessions] = useState<ClassroomSession[]>([]);
@@ -600,6 +604,7 @@ export function TeacherPage() {
     try {
       const result = await login(password);
       setTeacherSession(result.token, result.teacher.name);
+      setDatabaseUpdatedNotice("");
       setMessage("登录成功");
     } catch (err) {
       setError((err as Error).message);
@@ -1066,6 +1071,34 @@ export function TeacherPage() {
       setError((err as Error).message);
     } finally {
       setSignInControlBusy(false);
+    }
+  }
+
+  async function handleUpdateDatabase(file: File) {
+    if (!file.name.toLowerCase().endsWith(".db")) {
+      setError("请选择 .db 数据库备份文件");
+      return;
+    }
+    setUpdatingDatabase(true);
+    setError("");
+    try {
+      await updateDatabaseFromFile(file);
+      clearSession();
+      setPassword("");
+      setBackups([]);
+      setCourses([]);
+      setClasses([]);
+      setSessions([]);
+      setStudents([]);
+      setAccessInfo(null);
+      useStatusStore.getState().setTeacherStatus(null, null);
+      useStatusStore.getState().setTeacherAccessUrl(null);
+      setDatabaseUpdatedNotice("数据库已更新。请使用所选数据库对应的教师密码重新登录。");
+      void fetchAuthStatus().then(setAuthStatus).catch((err: Error) => setError(err.message));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setUpdatingDatabase(false);
     }
   }
 
@@ -1984,6 +2017,7 @@ export function TeacherPage() {
           <CardContent>
             <Stack spacing={2}>
               <Typography variant="h2">{authStatus.password_set ? "教师登录" : "首次设置教师密码"}</Typography>
+              {databaseUpdatedNotice && <Alert severity="success" sx={{ overflowWrap: "anywhere" }}>{databaseUpdatedNotice}</Alert>}
               <TextField
                 label="密码"
                 type="password"
@@ -3701,12 +3735,32 @@ export function TeacherPage() {
             <Card>
               <CardContent>
                 <Stack spacing={2}>
-                  <Stack direction="row" alignItems="center" justifyContent="space-between">
+                  <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "flex-start", sm: "center" }} justifyContent="space-between" spacing={1}>
                     <Typography variant="h2">数据库备份</Typography>
-                    <Button variant="contained" startIcon={<BackupIcon />} onClick={handleBackup}>
-                      立即备份
-                    </Button>
+                    <Stack direction="row" spacing={1}>
+                      <Button variant="contained" startIcon={<BackupIcon />} onClick={handleBackup} disabled={updatingDatabase}>
+                        立即备份
+                      </Button>
+                      <Button variant="outlined" startIcon={updatingDatabase ? <CircularProgress size={18} /> : <RestoreIcon />} onClick={() => databaseFileInputRef.current?.click()} disabled={updatingDatabase}>
+                        {updatingDatabase ? "更新中…" : "更新数据库"}
+                      </Button>
+                    </Stack>
                   </Stack>
+                  <input
+                    ref={databaseFileInputRef}
+                    type="file"
+                    accept=".db"
+                    aria-label="选择数据库备份文件"
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) void handleUpdateDatabase(file);
+                    }}
+                  />
+                  <Typography variant="body2" color="text.secondary">
+                    从 U 盘 backup 文件夹选择 .db 文件，程序会直接更新{startup?.database_path ? ` ${startup.database_path}` : "本机数据库"}；请在上课前操作。
+                  </Typography>
                   <Stack spacing={1}>
                     {backups.length === 0 && <Typography color="text.secondary">暂无备份记录</Typography>}
                     {backups.slice(0, 5).map((backup) => (

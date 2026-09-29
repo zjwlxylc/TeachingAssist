@@ -88,3 +88,12 @@ export function createBackup() {
     { method: "POST" }
   );
 }
+
+export function updateDatabaseFromFile(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<{ file_name: string; safety_backup: string }>("/system/backups/upload-restore", {
+    method: "POST",
+    body: form
+  });
+}
