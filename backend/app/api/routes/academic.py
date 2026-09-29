@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import require_teacher
 from app.schemas.response import ApiResponse, ok
 from app.services import academic as academic_service
+from app.services import academic_deletion
 
 
 router = APIRouter(prefix="/academic", tags=["academic"])
@@ -51,6 +52,31 @@ class ConfirmImportRequest(BaseModel):
 
 class StudentActiveRequest(BaseModel):
     is_active: bool
+
+
+class DeleteRequest(BaseModel):
+    confirmation_name: str = Field(min_length=1)
+    preview_token: str = Field(min_length=1, max_length=128)
+
+
+@router.get('/classes/{class_id}/deletion-preview', response_model=ApiResponse[dict[str, object]])
+def class_deletion_preview(class_id: int, _teacher: dict[str, object] = Depends(require_teacher)) -> ApiResponse[dict[str, object]]:
+    return ok(academic_deletion.preview_deletion('classes', class_id))
+
+
+@router.delete('/classes/{class_id}', response_model=ApiResponse[dict[str, object]])
+def delete_class(class_id: int, payload: DeleteRequest, _teacher: dict[str, object] = Depends(require_teacher)) -> ApiResponse[dict[str, object]]:
+    return ok(academic_deletion.delete_resource('classes', class_id, payload.confirmation_name, payload.preview_token), message='班级已删除')
+
+
+@router.get('/sessions/{session_id}/deletion-preview', response_model=ApiResponse[dict[str, object]])
+def session_deletion_preview(session_id: int, _teacher: dict[str, object] = Depends(require_teacher)) -> ApiResponse[dict[str, object]]:
+    return ok(academic_deletion.preview_deletion('sessions', session_id))
+
+
+@router.delete('/sessions/{session_id}', response_model=ApiResponse[dict[str, object]])
+def delete_session(session_id: int, payload: DeleteRequest, _teacher: dict[str, object] = Depends(require_teacher)) -> ApiResponse[dict[str, object]]:
+    return ok(academic_deletion.delete_resource('sessions', session_id, payload.confirmation_name, payload.preview_token), message='课堂已删除')
 
 
 @router.get("/courses", response_model=ApiResponse[list[dict[str, object]]])

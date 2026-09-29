@@ -1,5 +1,7 @@
 # 问题排查：course_students 表缺失导致的系统错误
 
+> 本文记录旧版故障。当前数据库迁移已废弃 `course_students` 表，请勿按下方旧命令手动创建该表。当前源码统一双击仓库根目录的 `开始上课.bat` 启动。
+
 ## 问题症状
 
 - 浏览器显示红色警告："系统内部错误"
@@ -24,25 +26,16 @@ set PYTHONPATH=D:\Agent\TeachingAssist-main\backend
 python -c "import sqlite3; conn = sqlite3.connect('C:/TeachingAssist/data/teaching_assist.db'); conn.execute('CREATE TABLE IF NOT EXISTS course_students (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER NOT NULL, class_id INTEGER NOT NULL, student_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime(\"now\")), UNIQUE(course_id, student_id), FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE, FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE, FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE)'); conn.commit(); conn.close(); print('course_students 表已创建')"
 ```
 
-3. 重新双击 `start_dev.bat` 启动服务
+3. 重新双击仓库根目录的 `开始上课.bat` 启动服务
 
 ### 方案二：使用修复脚本
 
-已为你创建了 `fix_and_start.bat` 脚本，它会：
-- 检查 Python 环境
-- 验证 course_students 表是否存在
-- 启动后端服务
+旧版的 `fix_and_start.bat` 已移除；当前版本由 `开始上课.bat` 构建前端并启动后端。
 
 **使用方法：**
 1. 关闭所有 TA-Backend 和 TA-Frontend 窗口
-2. 双击 `fix_and_start.bat`
-3. 等待后端启动完成（看到 "Application startup complete" 信息）
-4. 在新的命令行窗口中启动前端：
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-5. 浏览器访问 http://127.0.0.1:5173
+2. 双击仓库根目录的 `开始上课.bat`
+3. 等待浏览器自动打开教师端
 
 ### 方案三：重建数据库（慎用）
 

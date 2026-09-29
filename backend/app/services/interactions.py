@@ -135,10 +135,14 @@ def _insert_moderation_log(
             INSERT INTO interaction_moderation_log(
                 session_id, student_id, student_name, content, reason, status
             )
-            VALUES (?, ?, ?, ?, ?, 'pending')
+            SELECT ?, ?, ?, ?, ?, 'pending'
+            WHERE EXISTS (SELECT 1 FROM classroom_sessions WHERE id = ?)
+              AND EXISTS (SELECT 1 FROM students WHERE id = ?)
             """,
-            (session_id, student["id"], name.strip(), content, verdict.get("reason") or ""),
+            (session_id, student["id"], name.strip(), content, verdict.get("reason") or "", session_id, student["id"]),
         )
+        if cursor.rowcount == 0:
+            raise AppError("课堂或学生已删除，请刷新页面", code="SESSION_NOT_FOUND", status_code=404)
         return int(cursor.lastrowid)
 
 

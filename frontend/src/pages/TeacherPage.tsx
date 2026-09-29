@@ -57,6 +57,7 @@ import RestoreIcon from "@mui/icons-material/Restore";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import EditIcon from "@mui/icons-material/Edit";
 import VisibilityIcon from "@mui/icons-material/Visibility";
+import AcademicDeleteButton, { AcademicKind } from "../components/AcademicDeleteButton";
 
 import {
   ClassGroup,
@@ -315,6 +316,9 @@ export function TeacherPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [classes, setClasses] = useState<ClassGroup[]>([]);
   const [sessions, setSessions] = useState<ClassroomSession[]>([]);
+  const [classListSearch, setClassListSearch] = useState("");
+  const [sessionListSearch, setSessionListSearch] = useState("");
+  const deletedSessionIds = useRef(new Set<number>());
   const [students, setStudents] = useState<Student[]>([]);
   const [courseName, setCourseName] = useState("");
   const [teacherName, setTeacherName] = useState("");
@@ -587,6 +591,50 @@ export function TeacherPage() {
     setClasses(classData);
     setSessions(sessionData);
     setStudents(studentData);
+  }
+
+  async function handleAcademicDeleted(kind: AcademicKind, id: number, retainedFiles: number) {
+    if (kind === "classes") {
+      setClasses(current => current.filter(item => item.id !== id));
+      setCourseLinkedClasses(current => current.filter(item => item.id !== id));
+      setSelectedClassIds(current => current.filter(item => item !== id));
+      if (selectedClassId === id) setSelectedClassId("");
+      if (importTargetClassId === id) setImportTargetClassId("");
+      if (selectedClassViewId === id) { setSelectedClassViewId(null); setClassStudents([]); }
+      const deletedClassName = classes.find(item => item.id === id)?.name;
+      if (students.some(item => item.id === selectedMessageStudentPk && item.class_id === id)
+        || conversations.some(item => item.student_pk === selectedMessageStudentPk && item.class_name === deletedClassName)) {
+        setSelectedMessageStudentPk(""); selectedMessageStudentPkRef.current = "";
+        setMessageThread([]); setMessageThreadStudent(null); setMessageReplyContent("");
+      }
+      void handleLoadConversations();
+    } else {
+      deletedSessionIds.current.add(id);
+      setSessions(current => current.filter(item => item.id !== id));
+      setGlobalPendingApps(current => current.filter(item => item.session_id !== id));
+      if (signInSummary?.session.id === id) {
+        setSignInSummary(null); setSignInLogs([]); setDeviceAlerts([]);
+        setEnrollmentApplications([]); setSessionClasses([]);
+        signInSummarySessionRef.current = "";
+      }
+      if (announcementSessionId === id) { setAnnouncementSessionId(""); setAnnouncements([]); }
+      if (questionSessionId === id) {
+        setQuestionSessionId(""); setQuestions([]); setQuestionStats(null); setBonusSummary(null);
+        setStudentAnswers(null); setAnonymousStats(null);
+      }
+      if (homeworkSessionId === id) { setHomeworkSessionId(""); setHomeworkList([]); setHomeworkSummary(null); }
+      if (evaluationSessionId === id) { setEvaluationSessionId(""); setEvaluationReport(null); }
+      if (recoverySessionId === id) { setRecoverySessionId(""); setRecoveryEvents([]); }
+      if (interactionSessionId === id) {
+        setInteractionSessionId(""); setInteractionMessages([]); setInteractionSettings(null);
+        setModerationLogs([]); setInteractionUnread(0); latestInteractionIdRef.current = 0;
+      }
+      if (aiSessionId === id) setAiSessionId("");
+    }
+    setError("");
+    setMessage(`${kind === "classes" ? "班级及其名单" : "课堂及其记录"}已删除。${retainedFiles ? `有 ${retainedFiles} 个附件因仍被使用、路径异常或文件被占用而保留。` : ""}`);
+    try { await reloadAcademic(); }
+    catch { setError("删除已完成，但列表刷新失败，请刷新页面查看。"); }
   }
 
   async function submitSetup() {
@@ -1083,6 +1131,7 @@ export function TeacherPage() {
     setError("");
     try {
       await updateDatabaseFromFile(file);
+      deletedSessionIds.current.clear();
       clearSession();
       setPassword("");
       setBackups([]);
@@ -1111,6 +1160,7 @@ export function TeacherPage() {
         fetchEnrollmentApplications(sessionId, "pending").catch(() => [] as EnrollmentApplication[]),
         fetchSessionClasses(sessionId).catch(() => [] as Array<{id: number; name: string}>),
       ]);
+      if (deletedSessionIds.current.has(sessionId)) return;
       setSignInSummary(summary);
       setSignInLogs(logs);
       setDeviceAlerts(alerts);
@@ -2853,8 +2903,10 @@ export function TeacherPage() {
 
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Typography fontWeight={700} sx={{ mb: 1 }}>班级列表</Typography>
+                <TextField size="small" label="搜索班级" value={classListSearch}
+                  onChange={event => setClassListSearch(event.target.value)} sx={{ mb: 2 }} />
                 <Stack spacing={0.5}>
-                  {classes.map((klass) => (
+                  {classes.filter(klass => klass.name.includes(classListSearch.trim())).map((klass) => (
                     <Box
                       key={klass.id}
                       sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid", borderColor: "divider", pb: 0.5 }}
@@ -2894,12 +2946,15 @@ export function TeacherPage() {
                             <IconButton size="small" onClick={() => handleStartRename(klass)} title="重命名班级">
                               <EditIcon fontSize="small" />
                             </IconButton>
+                            <AcademicDeleteButton kind="classes" id={klass.id} onDeleted={handleAcademicDeleted}
+                              onViewSessions={() => setActiveTeacherSection("classroom")} />
                           </>
                         )}
                       </Box>
                     </Box>
                   ))}
                   {classes.length === 0 && <Typography color="text.secondary">暂无班级，请先新建班级</Typography>}
+                  {classes.length > 0 && !classes.some(klass => klass.name.includes(classListSearch.trim())) && <Typography color="text.secondary">没有匹配的班级</Typography>}
                 </Stack>
 
                 {selectedClassViewId !== null && (
@@ -3273,7 +3328,9 @@ export function TeacherPage() {
               <Grid container spacing={2}>
                 <Grid item xs={12} md={6}>
                   <Stack spacing={1.5}>
-                    {sessions.map((session) => (
+                    <TextField size="small" label="搜索课堂、课程或班级" value={sessionListSearch}
+                      onChange={event => setSessionListSearch(event.target.value)} />
+                    {sessions.filter(session => `${session.id} ${session.title} ${session.course_name} ${session.class_name ?? ""}`.includes(sessionListSearch.trim())).map((session) => (
                       <Paper key={session.id} variant="outlined" sx={{ p: 2 }}>
                         <Stack spacing={1}>
                           <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={1}>
@@ -3294,7 +3351,7 @@ export function TeacherPage() {
                                     ? "default"
                                     : "warning"
                               }
-                              label={session.status}
+                              label={sessionStatusLabel(session.status)}
                               sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
                             />
                           </Stack>
@@ -3340,6 +3397,7 @@ export function TeacherPage() {
                             >
                               签到统计
                             </Button>
+                            <AcademicDeleteButton kind="sessions" id={session.id} onDeleted={handleAcademicDeleted} />
                           </Stack>
                           {session.status === "active" && (
                             <Typography variant="body2" color="text.secondary">
@@ -3353,6 +3411,7 @@ export function TeacherPage() {
                       </Paper>
                     ))}
                     {sessions.length === 0 && <Typography color="text.secondary">暂无课堂，请先完成课前准备。</Typography>}
+                    {sessions.length > 0 && !sessions.some(session => `${session.id} ${session.title} ${session.course_name} ${session.class_name ?? ""}`.includes(sessionListSearch.trim())) && <Typography color="text.secondary">没有匹配的课堂</Typography>}
                   </Stack>
                 </Grid>
                 <Grid item xs={12} md={6}>

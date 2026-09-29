@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from app.db.session import get_connection
+from app.core.exceptions import AppError
 
 STUDENT_TOKEN_TTL_SECONDS = 12 * 3600
 
@@ -29,15 +30,19 @@ def create_student_session(student_id: int, session_id: int) -> str:
     token_hash = _hash_token(token)
     expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + STUDENT_TOKEN_TTL_SECONDS))
     with get_connection() as connection:
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO student_sessions(student_id, session_id, token_hash, expires_at)
-            VALUES (?, ?, ?, ?)
+            SELECT ?, ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM students WHERE id = ?)
+              AND EXISTS (SELECT 1 FROM classroom_sessions WHERE id = ?)
             ON CONFLICT(student_id, session_id)
             DO UPDATE SET token_hash = excluded.token_hash, created_at = datetime('now'), expires_at = excluded.expires_at
             """,
-            (int(student_id), int(session_id), token_hash, expires_at),
+            (int(student_id), int(session_id), token_hash, expires_at, int(student_id), int(session_id)),
         )
+        if cursor.rowcount == 0:
+            raise AppError("课堂或学生已删除，请刷新页面", code="STUDENT_SESSION_INVALID", status_code=409)
     return token
 
 
